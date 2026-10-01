@@ -1,11 +1,13 @@
 #include "Theme.h"
 
+#include "StyleScale.h"
 #include "ThemeLoader.h"
 
 #include <imgui.h>
 #include <implot.h>
 #include <spdlog/spdlog.h>
 
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <string_view>
@@ -289,12 +291,20 @@ void Theme::setTheme(std::size_t index)
     spdlog::debug("Theme change queued: index={}", index);
 }
 
-auto Theme::applyPendingTheme() -> bool
+auto Theme::applyPendingStyleChanges() -> bool
 {
     if (!m_PendingThemeIndex.has_value())
     {
+        // A font-size or display-scale change still needs the style rebuilt, just without the
+        // theme-changed signal.
+        if (m_StyleDirty)
+        {
+            m_StyleDirty = false;
+            applyImGuiStyle();
+        }
         return false;
     }
+    m_StyleDirty = false;
 
     const std::size_t index = m_PendingThemeIndex.value();
     m_PendingThemeIndex.reset();
@@ -409,28 +419,54 @@ void Theme::applyImGuiStyle() const
     style.Colors[ImGuiCol_NavWindowingDimBg] = s.navWindowingDimBg;
     style.Colors[ImGuiCol_ModalWindowDimBg] = s.modalWindowDimBg;
 
-    // Style settings (consistent across themes)
-    style.WindowRounding = 4.0F;
-    style.ChildRounding = 4.0F;
-    style.FrameRounding = 2.0F;
-    style.PopupRounding = 4.0F;
-    style.ScrollbarRounding = 4.0F;
-    style.GrabRounding = 2.0F;
-    style.TabRounding = 4.0F;
+    // Style settings (consistent across themes).
+    //
+    // The literals below are authored for the Medium preset on a 1.0 display scale and multiplied
+    // by `scale`, so padding, spacing, indents, scrollbars, grab sizes and corner radii track both
+    // the Font Size setting and the display's density (#936). Without that, text grew with the font
+    // setting while the chrome around it stayed frozen at these pixels, and a scaled display -- the
+    // common case on Windows -- got proportionally undersized chrome.
+    //
+    // Each field is re-assigned from its literal on every call, so the scale cannot compound. See
+    // computeStyleScale() for why this is done here rather than with ImGuiStyle::ScaleAllSizes().
+    const float scale = computeStyleScale(fontConfig().regularPt, m_DisplayScale);
 
+    style.WindowRounding = 4.0F * scale;
+    style.ChildRounding = 4.0F * scale;
+    style.FrameRounding = 2.0F * scale;
+    style.PopupRounding = 4.0F * scale;
+    style.ScrollbarRounding = 4.0F * scale;
+    style.GrabRounding = 2.0F * scale;
+    style.TabRounding = 4.0F * scale;
+
+    // Borders are hairlines and are deliberately left unscaled: a window border reads as an edge,
+    // not as a proportion of the content, and on both platforms the system chrome keeps it at one
+    // pixel regardless of density.
     style.WindowBorderSize = 1.0F;
     style.ChildBorderSize = 1.0F;
     style.PopupBorderSize = 1.0F;
     style.FrameBorderSize = 0.0F;
     style.TabBorderSize = 0.0F;
 
-    style.WindowPadding = ImVec2(8.0F, 8.0F);
-    style.FramePadding = ImVec2(4.0F, 3.0F);
-    style.ItemSpacing = ImVec2(8.0F, 4.0F);
-    style.ItemInnerSpacing = ImVec2(4.0F, 4.0F);
-    style.IndentSpacing = 20.0F;
-    style.ScrollbarSize = 14.0F;
-    style.GrabMinSize = 10.0F;
+    style.WindowPadding = ImVec2(8.0F * scale, 8.0F * scale);
+    style.FramePadding = ImVec2(4.0F * scale, 3.0F * scale);
+    style.ItemSpacing = ImVec2(8.0F * scale, 4.0F * scale);
+    style.ItemInnerSpacing = ImVec2(4.0F * scale, 4.0F * scale);
+    // Authored here rather than left at ImGui's default, which is this same ImVec2(4, 2) -- so the
+    // look is unchanged at the reference configuration, but the value now scales. It is the one
+    // style field this application reads without authoring, and it is the second most read of them
+    // all: thirteen sites depend on it, and not for cosmetics but for layout arithmetic. ChartGrid
+    // subtracts rows*CellPadding.y*2 from the available height to decide whether a scrollbar is
+    // needed (#823), CpuCoresSection and StorageSection fold it into their cell-height floors, and
+    // ProcessDetailsPanel sizes columns by it. Several of those cache their result keyed on
+    // CellPadding.y changing, so they already assume it tracks the style -- leaving it unscaled
+    // while ItemSpacing beside it scaled would have made that assumption quietly wrong.
+    style.CellPadding = ImVec2(4.0F * scale, 2.0F * scale);
+    style.IndentSpacing = 20.0F * scale;
+    style.ScrollbarSize = 14.0F * scale;
+    style.GrabMinSize = 10.0F * scale;
+
+    spdlog::info("ImGui style scaled by {:.2f} ({} preset at {:.2f} display scale)", scale, fontConfig().name, m_DisplayScale);
 
     // Apply ImPlot style colors from theme
     // StyleColorsAuto() derives colors from current ImGui style
@@ -500,6 +536,27 @@ void Theme::setFontSize(FontSize size)
     }
     m_CurrentFontSize = size;
     spdlog::info("Font size changed to: {}", fontConfig().name);
+
+    // Queue a style rebuild so padding, spacing and scrollbars follow the new font size; without it
+    // the chrome keeps the previous preset's proportions until the next theme change (#936). Queued
+    // rather than applied because the settings dialog calls this from inside a live frame --
+    // see applyPendingStyleChanges().
+    m_StyleDirty = true;
+}
+
+void Theme::setDisplayScale(float scale)
+{
+    // Compared with a tolerance rather than ==: this is a "has the density actually changed" guard
+    // on a value SDL computes in floating point, and an exact comparison is both meaningless at
+    // that precision and flagged by CodeQL.
+    constexpr float SCALE_EPSILON = 1e-4F;
+    if (std::abs(scale - m_DisplayScale) < SCALE_EPSILON)
+    {
+        return;
+    }
+    m_DisplayScale = scale;
+    spdlog::info("Display scale set to: {:.2f}", scale);
+    m_StyleDirty = true;
 }
 
 auto Theme::fontConfig() const -> const FontSizeConfig&

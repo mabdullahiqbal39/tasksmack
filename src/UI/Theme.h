@@ -244,9 +244,18 @@ class Theme
     /// Apply current theme colors to ImGui style
     void applyImGuiStyle() const;
 
-    /// Apply any pending theme change (call at start of frame before rendering)
-    /// Returns true if a theme was applied
-    auto applyPendingTheme() -> bool;
+    /// Flush any queued theme, font-size or display-scale change.
+    ///
+    /// Must be called at the start of a frame, before any widget is laid out. Every one of those
+    /// changes rewrites the global ImGui and ImPlot styles, and the settings dialog triggers them
+    /// from an Apply button *inside* a live frame, so applying them where they are requested would
+    /// leave that frame half laid out against the old style and half against the new one. setTheme()
+    /// has deferred for this reason since it was written; setFontSize() and setDisplayScale() now
+    /// defer the same way.
+    ///
+    /// @return true if a theme change was applied (a style-only rebuild does not count, as callers
+    ///         use this to decide whether to re-read theme colors).
+    auto applyPendingStyleChanges() -> bool;
 
     /// Get current color scheme
     [[nodiscard]] auto scheme() const -> const ColorScheme&;
@@ -268,13 +277,34 @@ class Theme
 
     // ============ Font Size Management ============
 
+    /// Record the display scale from SDL_GetWindowDisplayScale(), 1.0 at 96 DPI.
+    ///
+    /// Feeds the ImGuiStyle scale factor so chrome tracks display density as well as font size
+    /// (#936). Sampled once, after the window exists and before the fonts are baked, because the
+    /// font atlas is pre-baked at that same density: re-scaling the style alone when a window is
+    /// dragged to a differently scaled monitor would grow the chrome while the text stayed put. See
+    /// #943 for handling SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED across both.
+    ///
+    /// Queues the rebuild rather than performing it, like setTheme() -- see
+    /// applyPendingStyleChanges(), which flushes it at the next frame boundary.
+    void setDisplayScale(float scale);
+
+    [[nodiscard]] auto displayScale() const -> float
+    {
+        return m_DisplayScale;
+    }
+
     /// Get current font size preset
     [[nodiscard]] auto currentFontSize() const -> FontSize
     {
         return m_CurrentFontSize;
     }
 
-    /// Set font size preset (triggers font rebuild on next frame)
+    /// Select a font size preset.
+    ///
+    /// Does not rebuild any font: every preset is pre-baked into the atlas at startup, so this
+    /// only changes which one regularFont()/largeFont() hand out. It does queue a style rebuild,
+    /// so padding and spacing follow the new size -- see applyPendingStyleChanges().
     void setFontSize(FontSize size);
 
     /// Get font size config
@@ -347,8 +377,14 @@ class Theme
     std::vector<ColorScheme> m_LoadedSchemes;
     std::size_t m_CurrentThemeIndex = 0;
     std::optional<std::size_t> m_PendingThemeIndex; // Deferred theme change (applied next frame)
+    // Set when a font-size or display-scale change needs the style rebuilt; flushed at the next
+    // frame boundary by applyPendingStyleChanges().
+    bool m_StyleDirty = false;
 
     FontSize m_CurrentFontSize = FontSize::Medium;
+
+    // Display density, 1.0 at 96 DPI. Defaults to 1.0 so the style is sane before the window exists.
+    float m_DisplayScale = 1.0F;
     std::array<FontSizeConfig, FONT_SIZE_COUNT> m_FontSizes;
 
     // Pre-baked fonts for each size preset (regular and large variants)
