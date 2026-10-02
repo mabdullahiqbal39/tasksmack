@@ -587,6 +587,7 @@ void ProcessesPanel::renderContent()
         ImGui::TableSetupScrollFreeze(0, 1); // Freeze header row
 
         // Setup ALL columns with stable IDs - use enum value as user_id for stable identification
+        const float emPx = ImGui::GetFontSize();
         for (const ProcessColumn col : allProcessColumns())
         {
             const auto info = getColumnInfo(col);
@@ -621,7 +622,8 @@ void ProcessesPanel::renderContent()
             {
                 // Use menuName for TableSetupColumn (shown in context menu)
                 // We render custom headers with info.name below
-                ImGui::TableSetupColumn(std::string(info.menuName).c_str(), flags, info.defaultWidth, toImGuiId(col));
+                // The default is authored at the reference font; scale it to the current one (#913).
+                ImGui::TableSetupColumn(std::string(info.menuName).c_str(), flags, scaledDefaultWidth(info, emPx), toImGuiId(col));
             }
             else
             {
