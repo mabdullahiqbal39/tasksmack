@@ -19,6 +19,7 @@
 #include <format>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <ratio>
 #include <span>
@@ -220,6 +221,39 @@ template<typename T, typename OnRun> inline void forEachFiniteRun(const T* value
     }
 }
 
+/// Stride-reduce `count` samples to `outCount` (> 1, < count) points in `outX`/`outY`, keeping gaps.
+///
+/// Output point k takes source sample s_k = k * (count - 1) / (outCount - 1). A plain stride would
+/// skip any NaN that falls between two picked samples and draw straight across a missing reading,
+/// so if any sample in (s_{k-1}, s_k] is non-finite, point k's value is NaN instead.
+template<typename TX, typename TY>
+inline void reduceSeriesKeepingGaps(const TX* xData, const TY* yData, int count, int outCount, TX* outX, TY* outY)
+{
+    int previousSource = -1;
+    for (int resultIdx = 0; resultIdx < outCount; ++resultIdx)
+    {
+        const std::size_t numerator = static_cast<std::size_t>(resultIdx) * static_cast<std::size_t>(count - 1);
+        const auto denominator = static_cast<std::size_t>(outCount - 1);
+        const int sourceIdx = static_cast<int>(numerator / denominator);
+
+        TY value = yData[sourceIdx];
+        if constexpr (std::is_floating_point_v<TY>)
+        {
+            for (int skipped = previousSource + 1; skipped <= sourceIdx; ++skipped)
+            {
+                if (!std::isfinite(yData[skipped]))
+                {
+                    value = std::numeric_limits<TY>::quiet_NaN();
+                    break;
+                }
+            }
+        }
+        outX[resultIdx] = xData[sourceIdx];
+        outY[resultIdx] = value;
+        previousSource = sourceIdx;
+    }
+}
+
 template<typename TX, typename TY>
 inline void plotLineWithFill(const char* label,
                              const TX* xData,
@@ -265,15 +299,7 @@ inline void plotLineWithFill(const char* label,
     {
         std::array<TX, LINE_PLOT_MAX_POINTS_DENSE> reducedXData{};
         std::array<TY, LINE_PLOT_MAX_POINTS_DENSE> reducedYData{};
-        for (int resultIdx = 0; resultIdx < effectiveMax; ++resultIdx)
-        {
-            const std::size_t numerator = static_cast<std::size_t>(resultIdx) * static_cast<std::size_t>(count - 1);
-            const auto denominator = static_cast<std::size_t>(effectiveMax - 1);
-            const int sourceIdx = static_cast<int>(numerator / denominator);
-
-            reducedXData[static_cast<std::size_t>(resultIdx)] = xData[sourceIdx];
-            reducedYData[static_cast<std::size_t>(resultIdx)] = yData[sourceIdx];
-        }
+        reduceSeriesKeepingGaps(xData, yData, count, effectiveMax, reducedXData.data(), reducedYData.data());
 
         renderSeries(reducedXData.data(), reducedYData.data(), effectiveMax);
         return;

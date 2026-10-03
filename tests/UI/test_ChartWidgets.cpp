@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <string>
 #include <utility>
@@ -167,6 +168,77 @@ TEST(NowBarTest, SelectTooltipFallsBackToLabelWhenValueTextEmpty)
 {
     const NowBar bar{.valueText = {}, .label = "CPU", .tooltipText = {}, .value01 = 0.5, .color = {}};
     EXPECT_EQ(selectNowBarTooltip(bar), "CPU");
+}
+
+// ========== reduceSeriesKeepingGaps ==========
+
+TEST(ChartWidgetsReduceTest, ReductionKeepsAGapThatFallsBetweenPickedSamples)
+{
+    // The #1041 review case: 1,440 samples reduced to the 720-point cap pick indices 718 and 720,
+    // so a lone NaN at 719 used to vanish and the line bridged the missing reading.
+    constexpr int count = 1440;
+    constexpr int outCount = LINE_PLOT_MAX_POINTS_DENSE;
+    std::vector<float> x(count);
+    std::vector<float> y(count, 50.0F);
+    for (int i = 0; i < count; ++i)
+    {
+        x[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+    y[719] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> outX(outCount);
+    std::vector<float> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    int nanCount = 0;
+    for (const float v : outY)
+    {
+        nanCount += std::isnan(v) ? 1 : 0;
+    }
+    EXPECT_EQ(nanCount, 1);
+    EXPECT_FLOAT_EQ(outY.front(), 50.0F);
+    EXPECT_FLOAT_EQ(outY.back(), 50.0F);
+    EXPECT_FLOAT_EQ(outX.back(), static_cast<float>(count - 1));
+}
+
+TEST(ChartWidgetsReduceTest, ReductionOfAFiniteSeriesIsAPlainStride)
+{
+    constexpr int count = 10;
+    constexpr int outCount = 4;
+    std::vector<double> x(count);
+    std::vector<double> y(count);
+    for (int i = 0; i < count; ++i)
+    {
+        x[static_cast<std::size_t>(i)] = static_cast<double>(i);
+        y[static_cast<std::size_t>(i)] = static_cast<double>(i) * 10.0;
+    }
+
+    std::vector<double> outX(outCount);
+    std::vector<double> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    // Indices k * 9 / 3 = 0, 3, 6, 9.
+    EXPECT_DOUBLE_EQ(outY[0], 0.0);
+    EXPECT_DOUBLE_EQ(outY[1], 30.0);
+    EXPECT_DOUBLE_EQ(outY[2], 60.0);
+    EXPECT_DOUBLE_EQ(outY[3], 90.0);
+    EXPECT_DOUBLE_EQ(outX[3], 9.0);
+}
+
+TEST(ChartWidgetsReduceTest, ReductionKeepsALeadingGap)
+{
+    constexpr int count = 10;
+    constexpr int outCount = 4;
+    std::vector<float> x(count, 0.0F);
+    std::vector<float> y(count, 1.0F);
+    y[0] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> outX(outCount);
+    std::vector<float> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    EXPECT_TRUE(std::isnan(outY[0]));
+    EXPECT_FLOAT_EQ(outY[1], 1.0F);
 }
 
 // ========== Axis formatters ==========
