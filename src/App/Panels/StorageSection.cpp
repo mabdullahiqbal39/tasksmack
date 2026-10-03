@@ -8,6 +8,7 @@
 #include "UI/Format.h"
 #include "UI/HistoryPlotHeight.h"
 #include "UI/IconsFontAwesome6.h"
+#include "UI/RateAxis.h"
 #include "UI/Theme.h"
 
 #include <imgui.h>
@@ -17,6 +18,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <format>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -82,22 +85,35 @@ void renderDiskCell(const std::string& deviceName,
                     float cellHeight,
                     std::optional<float>& cachedOverhead)
 {
-    const double diskMax = std::max({readData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(readData)),
-                                     writeData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(writeData)),
-                                     currentRead,
-                                     currentWrite,
-                                     1.0});
+    // A per-disk series holds NaN for samples where the disk was absent, and currentRead/Write are
+    // NaN when it is absent from the latest sample (#1015). maxOfSeries, not max_element, whose
+    // answer depends on where a NaN sits; and the bars show N/A rather than a false 0 B/s, as the
+    // GPU fan bar does for an unreadable sample.
+    const auto finiteOrZero = [](double value)
+    {
+        return std::isfinite(value) ? value : 0.0;
+    };
+    const double diskMax =
+        std::max({UI::Widgets::maxOfSeries(readData, writeData), finiteOrZero(currentRead), finiteOrZero(currentWrite), 1.0});
 
-    const NowBar readBar{.valueText = UI::Format::formatBytesPerSec(currentRead),
-                         .label = "Read",
-                         .tooltipText = {},
-                         .value01 = normalizeToUnitInterval(currentRead, diskMax),
-                         .color = theme.scheme().chartIo};
-    const NowBar writeBar{.valueText = UI::Format::formatBytesPerSec(currentWrite),
-                          .label = "Write",
-                          .tooltipText = {},
-                          .value01 = normalizeToUnitInterval(currentWrite, diskMax),
-                          .color = theme.scheme().chartIoWrite};
+    const auto makeBar = [&](const char* label, double current, const ImVec4& color)
+    {
+        if (!std::isfinite(current))
+        {
+            return NowBar{.valueText = "N/A",
+                          .label = label,
+                          .tooltipText = std::format("{}: not reported this sample", label),
+                          .value01 = 0.0,
+                          .color = theme.scheme().textMuted};
+        }
+        return NowBar{.valueText = UI::Format::formatBytesPerSec(current),
+                      .label = label,
+                      .tooltipText = {},
+                      .value01 = normalizeToUnitInterval(current, diskMax),
+                      .color = color};
+    };
+    const NowBar readBar = makeBar("Read", currentRead, theme.scheme().chartIo);
+    const NowBar writeBar = makeBar("Write", currentWrite, theme.scheme().chartIoWrite);
 
     const float cellContentTop = ImGui::GetCursorPosY();
     ImGui::TextColored(theme.scheme().textPrimary, "%.*s", static_cast<int>(deviceName.size()), deviceName.data());
@@ -164,10 +180,10 @@ void renderDiskCell(const std::string& deviceName,
                         ImGui::Separator();
                         ImGui::TextColored(theme.scheme().chartIo,
                                            "Read: %s",
-                                           UI::Format::formatBytesPerSec(static_cast<double>(readData[*idxVal])).c_str());
+                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(readData[*idxVal])).c_str());
                         ImGui::TextColored(theme.scheme().chartIoWrite,
                                            "Write: %s",
-                                           UI::Format::formatBytesPerSec(static_cast<double>(writeData[*idxVal])).c_str());
+                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(writeData[*idxVal])).c_str());
                         ImGui::EndTooltip();
                     }
                 }
@@ -333,8 +349,9 @@ void renderStorageSection(RenderContext& ctx)
                 }
 
                 // Per-disk snapshot values for NowBars (O(1) lookup via pre-built map).
-                double diskRead = 0.0;
-                double diskWrite = 0.0;
+                // NaN if the disk is missing from the latest sample: renderDiskCell shows N/A, not 0.
+                double diskRead = std::numeric_limits<double>::quiet_NaN();
+                double diskWrite = std::numeric_limits<double>::quiet_NaN();
                 if (const auto it = diskLookup.find(disk.deviceName); it != diskLookup.end())
                 {
                     diskRead = it->second->readBytesPerSec;
