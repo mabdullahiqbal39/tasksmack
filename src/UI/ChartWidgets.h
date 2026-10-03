@@ -849,7 +849,11 @@ inline auto hoveredIndexFromPlotX(const std::vector<double>& timeData, double mo
 
 inline void setupLegendDefault()
 {
-    ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_NoHighlightItem);
+    // Horizontal: one row at any font size. ImPlot clips the legend to the plot area, and a vertical
+    // list of four series (the CPU chart's User/System/I/O Wait/Total) is taller than a chart's data
+    // area at the largest font presets, so the last entry was cut off. The row sits over the oldest
+    // part of the window, which is usually empty.
+    ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_NoHighlightItem | ImPlotLegendFlags_Horizontal);
 }
 
 /// Samples a history chart needs before its "collecting" hint is dropped.
