@@ -49,7 +49,6 @@ namespace
 
 using UI::Widgets::buildTimeAxisDoubles;
 using UI::Widgets::computeAlpha;
-using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::formatAxisBytesPerSec;
 using UI::Widgets::formatAxisLocalized;
 using UI::Widgets::formatAxisWatts;
@@ -82,6 +81,27 @@ template<typename T> [[nodiscard]] auto tailVector(const std::deque<T>& data, st
 }
 
 // ImPlot series counts are int; keep conversion explicit + checked.
+
+// One label per series, shared by its legend entry, tooltip row and NowBar (#1008).
+constexpr const char* CPU_TOTAL_LABEL = "Total";
+constexpr const char* CPU_USER_LABEL = "User";
+constexpr const char* CPU_SYSTEM_LABEL = "System";
+constexpr const char* MEM_USED_LABEL = "Used";
+constexpr const char* MEM_SHARED_LABEL = "Shared";
+constexpr const char* MEM_VIRTUAL_LABEL = "Virtual";
+constexpr const char* MEM_PEAK_LABEL = "Peak Used";
+constexpr const char* THREADS_LABEL = "Threads";
+constexpr const char* FAULTS_LABEL = "Page Faults/s";
+#ifdef _WIN32
+constexpr const char* GDI_LABEL = "GDI Objects";
+#endif
+constexpr const char* IO_READ_LABEL = "Read";
+constexpr const char* IO_WRITE_LABEL = "Write";
+constexpr const char* NET_SENT_LABEL = "Sent";
+constexpr const char* NET_RECV_LABEL = "Received";
+constexpr const char* POWER_LABEL = "Power";
+constexpr const char* GPU_UTIL_LABEL = "Utilization";
+constexpr const char* GPU_MEMORY_LABEL = "Memory";
 
 /// Percent of system RAM per byte for this process's memory figures, from its own resident size and
 /// resident percent (memoryPercent = memoryBytes / totalSystemMemoryBytes * 100). 0 when either is
@@ -202,7 +222,9 @@ void ProcessDetailsPanel::updateWithSnapshot(const Domain::ProcessSnapshot* snap
 
             m_MemoryHistory.push_back(usedPercent);
             m_SharedHistory.push_back(toPercent(snapshot->sharedBytes));
-            m_VirtualHistory.push_back(toPercent(snapshot->virtualBytes));
+            // Bytes, not a percent of RAM: a process's virtual size is usually larger than physical RAM,
+            // so as a percent it was clamped to 100 and carried no information (#992).
+            m_VirtualHistory.push_back(Domain::Numeric::toDouble(snapshot->virtualBytes));
             m_ThreadHistory.push_back(Domain::Numeric::toDouble(snapshot->threadCount));
             m_HandleHistory.push_back(Domain::Numeric::toDouble(snapshot->handleCount));
             m_PageFaultHistory.push_back(snapshot->pageFaultsPerSec);
@@ -518,7 +540,6 @@ void ProcessDetailsPanel::updateSmoothedUsage(const Domain::ProcessSnapshot& sna
     const double percentPerByte = memoryPercentPerByte(snapshot);
     const double targetMemUsedPercent = std::clamp(snapshot.memoryPercent, 0.0, 100.0);
     const double targetMemSharedPercent = memoryBytesToPercent(snapshot.sharedBytes, percentPerByte);
-    const double targetMemVirtualPercent = memoryBytesToPercent(snapshot.virtualBytes, percentPerByte);
 
     const bool initialized = m_SmoothedUsage.initialized && (deltaTimeSeconds > 0.0F);
 
@@ -551,8 +572,6 @@ void ProcessDetailsPanel::updateSmoothedUsage(const Domain::ProcessSnapshot& sna
     m_SmoothedUsage.memoryUsedPercent = initializeOrSmooth(m_SmoothedUsage.memoryUsedPercent, targetMemUsedPercent, alpha, initialized);
     m_SmoothedUsage.memorySharedPercent =
         initializeOrSmooth(m_SmoothedUsage.memorySharedPercent, targetMemSharedPercent, alpha, initialized);
-    m_SmoothedUsage.memoryVirtualPercent =
-        initializeOrSmooth(m_SmoothedUsage.memoryVirtualPercent, targetMemVirtualPercent, alpha, initialized);
     m_SmoothedUsage.initialized = true;
 }
 
@@ -798,17 +817,17 @@ void ProcessDetailsPanel::renderCpuUsageSection(UI::Widgets::FillPlotLayout& fil
 
         // Use smoothed values for NowBars for consistent animation
         const NowBar cpuTotalNow{.valueText = UI::Format::percentCompact(m_SmoothedUsage.cpuPercent),
-                                 .label = "CPU Total",
+                                 .label = CPU_TOTAL_LABEL,
                                  .tooltipText = {},
                                  .value01 = UI::Format::percent01(m_SmoothedUsage.cpuPercent),
                                  .color = theme.progressColor(m_SmoothedUsage.cpuPercent)};
         const NowBar cpuUserNow{.valueText = UI::Format::percentCompact(m_SmoothedUsage.cpuUserPercent),
-                                .label = "User",
+                                .label = CPU_USER_LABEL,
                                 .tooltipText = {},
                                 .value01 = UI::Format::percent01(m_SmoothedUsage.cpuUserPercent),
                                 .color = theme.scheme().cpuUser};
         const NowBar cpuSystemNow{.valueText = UI::Format::percentCompact(m_SmoothedUsage.cpuSystemPercent),
-                                  .label = "System",
+                                  .label = CPU_SYSTEM_LABEL,
                                   .tooltipText = {},
                                   .value01 = UI::Format::percent01(m_SmoothedUsage.cpuSystemPercent),
                                   .color = theme.scheme().cpuSystem};
@@ -843,34 +862,34 @@ void ProcessDetailsPanel::renderCpuUsageSection(UI::Widgets::FillPlotLayout& fil
                     // The bands share their labels with the User and System lines below, so ImPlot
                     // treats each band and its line as one legend item: hiding "User" hides both.
                     // With separate hidden labels the band stayed on screen after its line was hidden.
-                    ImPlot::PlotShaded("User",
+                    ImPlot::PlotShaded(CPU_USER_LABEL,
                                        cpuTimeData.data(),
                                        y0.data(),
                                        yUserTop.data(),
                                        plotCount,
                                        {ImPlotProp_FillColor, theme.scheme().cpuUserFill});
 
-                    ImPlot::PlotShaded("System",
+                    ImPlot::PlotShaded(CPU_SYSTEM_LABEL,
                                        cpuTimeData.data(),
                                        yUserTop.data(),
                                        ySystemTop.data(),
                                        plotCount,
                                        {ImPlotProp_FillColor, theme.scheme().cpuSystemFill});
 
-                    ImPlot::PlotLine("Total",
+                    ImPlot::PlotLine(CPU_TOTAL_LABEL,
                                      cpuTimeData.data(),
                                      cpuData.data(),
                                      plotCount,
                                      {ImPlotProp_LineColor, theme.scheme().chartCpu, ImPlotProp_LineWeight, UI::Widgets::lineWeight(2.0F)});
 
-                    ImPlot::PlotLine("User",
+                    ImPlot::PlotLine(CPU_USER_LABEL,
                                      cpuTimeData.data(),
                                      cpuUserData.data(),
                                      plotCount,
                                      {ImPlotProp_LineColor, theme.scheme().cpuUser, ImPlotProp_LineWeight, UI::Widgets::lineWeight(1.8F)});
 
                     ImPlot::PlotLine(
-                        "System",
+                        CPU_SYSTEM_LABEL,
                         cpuTimeData.data(),
                         cpuSystemData.data(),
                         plotCount,
@@ -883,18 +902,19 @@ void ProcessDetailsPanel::renderCpuUsageSection(UI::Widgets::FillPlotLayout& fil
                         {
                             if (*idxVal < alignedCount)
                             {
-                                ImGui::BeginTooltip();
-                                const auto ageText = formatAgeSeconds(cpuTimeData[*idxVal]);
-                                ImGui::TextUnformatted(ageText.c_str());
-                                ImGui::Separator();
-                                const double totalValue = cpuData[*idxVal];
-                                const ImVec4 totalColor = theme.progressColor(totalValue);
-                                ImGui::TextColored(totalColor, "Total: %s", UI::Format::percentCompact(totalValue).c_str());
-                                ImGui::TextColored(
-                                    theme.scheme().cpuUser, "User: %s", UI::Format::percentCompact(cpuUserData[*idxVal]).c_str());
-                                ImGui::TextColored(
-                                    theme.scheme().cpuSystem, "System: %s", UI::Format::percentCompact(cpuSystemData[*idxVal]).c_str());
-                                ImGui::EndTooltip();
+                                // Total in its line's colour, not progressColor, which matched nothing on the chart.
+                                const std::array rows{
+                                    UI::Widgets::TooltipRow{.label = CPU_TOTAL_LABEL,
+                                                            .color = theme.scheme().chartCpu,
+                                                            .value = UI::Format::percentCompact(cpuData[*idxVal])},
+                                    UI::Widgets::TooltipRow{.label = CPU_USER_LABEL,
+                                                            .color = theme.scheme().cpuUser,
+                                                            .value = UI::Format::percentCompact(cpuUserData[*idxVal])},
+                                    UI::Widgets::TooltipRow{.label = CPU_SYSTEM_LABEL,
+                                                            .color = theme.scheme().cpuSystem,
+                                                            .value = UI::Format::percentCompact(cpuSystemData[*idxVal])},
+                                };
+                                UI::Widgets::renderHistoryTooltip(cpuTimeData[*idxVal], rows);
                             }
                         }
                     }
@@ -948,13 +968,16 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
             // they stepped while the bars around them glided.
             const double usedNow = m_SmoothedUsage.memoryUsedPercent;
             const double sharedNow = m_SmoothedUsage.memorySharedPercent;
-            const double virtNowVal = m_SmoothedUsage.memoryVirtualPercent;
+            // Virtual size in bytes on its own right-hand axis (#992), eased like a rate axis and shared
+            // with its bar.
+            const double virtAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+                "##ProcOverviewMemory/Y2", UI::Widgets::maxOfSeries(virtData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES);
 
             std::vector<NowBar> memoryBars;
-            // No tooltipText: the hover tooltip is "label: value" (selectNowBarTooltip), percent-only
-            // to match the chart, which plots percents of RAM.
+            // No tooltipText: the hover tooltip is "label: value" (selectNowBarTooltip), in the
+            // chart's own units -- percents of RAM, and bytes for Virtual.
             memoryBars.push_back({.valueText = UI::Format::percentCompact(usedNow),
-                                  .label = "Memory Used",
+                                  .label = MEM_USED_LABEL,
                                   .tooltipText = {},
                                   .value01 = UI::Format::percent01(usedNow),
                                   .color = theme.scheme().chartMemory});
@@ -962,24 +985,28 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
             {
                 memoryBars.push_back({
                     .valueText = UI::Format::percentCompact(sharedNow),
-                    .label = "Shared",
+                    .label = MEM_SHARED_LABEL,
                     .tooltipText = {},
                     .value01 = UI::Format::percent01(sharedNow),
                     .color = theme.scheme().chartCpu,
                 });
             }
-            memoryBars.push_back({.valueText = UI::Format::percentCompact(virtNowVal),
-                                  .label = "Virtual",
+            memoryBars.push_back({.valueText = UI::Format::formatBytes(m_SmoothedUsage.virtualBytes),
+                                  .label = MEM_VIRTUAL_LABEL,
                                   .tooltipText = {},
-                                  .value01 = UI::Format::percent01(virtNowVal),
+                                  .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.virtualBytes, virtAxisUpper),
                                   .color = theme.scheme().chartIo});
 
             auto memoryPlot = [&]()
             {
-                const UI::Widgets::HistoryChart chart(UI::Widgets::withHeight(
-                    UI::Widgets::percentHistoryConfig("##ProcOverviewMemory", axisConfig.xMin, axisConfig.xMax), fill.plotHeight()));
+                // Four legend entries (Used, Shared, Virtual, Peak Used): one row (see legendHorizontal).
+                const UI::Widgets::HistoryChart chart(
+                    UI::Widgets::withHeight(UI::Widgets::withHorizontalLegend(UI::Widgets::percentHistoryConfig(
+                                                "##ProcOverviewMemory", axisConfig.xMin, axisConfig.xMax)),
+                                            fill.plotHeight()));
                 if (chart.active())
                 {
+                    UI::Widgets::setupSecondaryRateAxis(virtAxisUpper, UI::Widgets::formatAxisBytes);
                     UI::Widgets::drawCollectingHint(alignedCount);
                     // Draw peak working set as a horizontal reference line (never decreases)
                     if (m_PeakMemoryPercent > 0.0)
@@ -989,7 +1016,7 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
                         std::array<double, 2> peakX = {axisConfig.xMin, axisConfig.xMax};
                         std::array<double, 2> peakYVals = {peakY, peakY};
                         ImPlot::PlotLine(
-                            "Peak",
+                            MEM_PEAK_LABEL,
                             peakX.data(),
                             peakYVals.data(),
                             2,
@@ -998,7 +1025,7 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
 
                     if (!usedData.empty())
                     {
-                        plotLineWithFill("Used",
+                        plotLineWithFill(MEM_USED_LABEL,
                                          timeData.data(),
                                          usedData.data(),
                                          UI::Format::checkedCount(usedData.size()),
@@ -1008,7 +1035,7 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
 
                     if (!sharedData.empty())
                     {
-                        plotLineWithFill("Shared",
+                        plotLineWithFill(MEM_SHARED_LABEL,
                                          timeData.data(),
                                          sharedData.data(),
                                          UI::Format::checkedCount(sharedData.size()),
@@ -1018,12 +1045,17 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
 
                     if (!virtData.empty())
                     {
-                        plotLineWithFill("Virtual",
+                        // Line only: a fill on its own scale would cover the Used and Shared areas.
+                        ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
+                        plotLineWithFill(MEM_VIRTUAL_LABEL,
                                          timeData.data(),
                                          virtData.data(),
                                          UI::Format::checkedCount(virtData.size()),
                                          theme.scheme().chartIo,
-                                         theme.scheme().chartIoFill);
+                                         std::nullopt,
+                                         2.0F,
+                                         false);
+                        ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1);
                     }
 
                     if (ImPlot::IsPlotHovered())
@@ -1031,31 +1063,33 @@ void ProcessDetailsPanel::renderMemoryUsageSection(UI::Widgets::FillPlotLayout& 
                         const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
                         if (const auto idxVal = hoveredIndexFromPlotX(timeData, mouse.x))
                         {
-                            ImGui::BeginTooltip();
-                            const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                            ImGui::TextUnformatted(ageText.c_str());
-                            ImGui::Separator();
+                            std::vector<UI::Widgets::TooltipRow> rows;
                             if (*idxVal < usedData.size())
                             {
-                                ImGui::TextColored(
-                                    theme.scheme().chartMemory, "Used: %s", UI::Format::percentCompact(usedData[*idxVal]).c_str());
+                                rows.push_back({.label = MEM_USED_LABEL,
+                                                .color = theme.scheme().chartMemory,
+                                                .value = UI::Format::percentCompact(usedData[*idxVal])});
                             }
                             if (*idxVal < sharedData.size())
                             {
-                                ImGui::TextColored(
-                                    theme.scheme().chartCpu, "Shared: %s", UI::Format::percentCompact(sharedData[*idxVal]).c_str());
+                                rows.push_back({.label = MEM_SHARED_LABEL,
+                                                .color = theme.scheme().chartCpu,
+                                                .value = UI::Format::percentCompact(sharedData[*idxVal])});
                             }
                             if (*idxVal < virtData.size())
                             {
-                                ImGui::TextColored(
-                                    theme.scheme().chartIo, "Virtual: %s", UI::Format::percentCompact(virtData[*idxVal]).c_str());
+                                rows.push_back({.label = MEM_VIRTUAL_LABEL,
+                                                .color = theme.scheme().chartIo,
+                                                .value = UI::Format::formatBytes(virtData[*idxVal])});
                             }
                             if (m_PeakMemoryPercent > 0.0)
                             {
-                                ImGui::TextColored(
-                                    theme.scheme().textWarning, "Peak: %s", UI::Format::percentCompact(m_PeakMemoryPercent).c_str());
+                                // The line's colour: this row was textWarning, which matched nothing (#1005).
+                                rows.push_back({.label = MEM_PEAK_LABEL,
+                                                .color = theme.scheme().chartPeakLine,
+                                                .value = UI::Format::percentCompact(m_PeakMemoryPercent)});
                             }
-                            ImGui::EndTooltip();
+                            UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                         }
                     }
                 }
@@ -1124,9 +1158,9 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
         "##ProcThreadsFaults/Y2", UI::Widgets::maxOfSeries(faultData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
 
     const NowBar threadsBar{.valueText = UI::Format::formatCountWithLabel(std::llround(m_SmoothedUsage.threadCount), "threads"),
-                            .label = "Threads",
-                            .tooltipText =
-                                std::format("Threads: {}", UI::Format::formatIntLocalized(std::llround(m_SmoothedUsage.threadCount))),
+                            .label = THREADS_LABEL,
+                            .tooltipText = UI::Widgets::formatTooltipRow(
+                                THREADS_LABEL, UI::Format::formatIntLocalized(std::llround(m_SmoothedUsage.threadCount))),
                             .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.threadCount, countAxisUpper),
                             .color = theme.scheme().chartCpu};
 
@@ -1144,7 +1178,7 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
         .color = theme.scheme().chartMemory};
 
     const NowBar faultsBar{.valueText = UI::Format::formatCountPerSecond(m_SmoothedUsage.pageFaultsPerSec),
-                           .label = "Page Faults",
+                           .label = FAULTS_LABEL,
                            .tooltipText = {},
                            .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.pageFaultsPerSec, faultAxisUpper),
                            // The line's colour: this bar was chartIo while its line is accentColor(3) (#1004).
@@ -1157,10 +1191,10 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
     const NowBar gdiBar{
         .valueText =
             hasGdiSamples ? UI::Format::formatCountWithLabel(std::llround(m_SmoothedUsage.gdiObjectCount), "GDI") : std::string("N/A"),
-        .label = "GDI Objects",
-        .tooltipText = hasGdiSamples
-                         ? std::format("GDI Objects: {}", UI::Format::formatIntLocalized(std::llround(m_SmoothedUsage.gdiObjectCount)))
-                         : std::string("GDI Objects: N/A"),
+        .label = GDI_LABEL,
+        .tooltipText = hasGdiSamples ? UI::Widgets::formatTooltipRow(
+                                           GDI_LABEL, UI::Format::formatIntLocalized(std::llround(m_SmoothedUsage.gdiObjectCount)))
+                                     : UI::Widgets::formatTooltipRow(GDI_LABEL, "N/A"),
         .value01 = hasGdiSamples ? UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.gdiObjectCount, countAxisUpper) : 0.0,
         .color = theme.accentColor(4)};
 #endif
@@ -1175,10 +1209,10 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
                                     fill.plotHeight()));
         if (chart.active())
         {
-            chart.setupSecondaryRateAxis(faultAxisUpper, formatAxisLocalized);
+            UI::Widgets::setupSecondaryRateAxis(faultAxisUpper, formatAxisLocalized);
             UI::Widgets::drawCollectingHint(alignedCount);
             const int plotCount = UI::Format::checkedCount(alignedCount);
-            plotLineWithFill("Threads",
+            plotLineWithFill(THREADS_LABEL,
                              timeData.data(),
                              threadData.data(),
                              plotCount,
@@ -1197,7 +1231,7 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
                              true,
                              UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
             ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
-            plotLineWithFill("Page Faults/s",
+            plotLineWithFill(FAULTS_LABEL,
                              timeData.data(),
                              faultData.data(),
                              plotCount,
@@ -1212,7 +1246,7 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
             if (hasGdiSamples && gdiTimeOffset < timeData.size())
             {
                 const int gdiPlotCount = UI::Format::checkedCount(std::min(gdiData.size(), timeData.size() - gdiTimeOffset));
-                plotLineWithFill("GDI Objects",
+                plotLineWithFill(GDI_LABEL,
                                  std::span(timeData).subspan(gdiTimeOffset).data(),
                                  gdiData.data(),
                                  gdiPlotCount,
@@ -1231,29 +1265,28 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
                 {
                     if (*idxVal < alignedCount)
                     {
-                        ImGui::BeginTooltip();
-                        const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                        ImGui::TextUnformatted(ageText.c_str());
-                        ImGui::Separator();
-                        ImGui::TextColored(theme.scheme().chartCpu,
-                                           "Threads: %s",
-                                           UI::Format::formatIntLocalized(std::llround(threadData[*idxVal])).c_str());
-                        ImGui::TextColored(theme.scheme().chartMemory,
-                                           "%s: %s",
-                                           handleLabel,
-                                           UI::Format::formatIntLocalized(std::llround(handleData[*idxVal])).c_str());
-                        ImGui::TextColored(
-                            theme.accentColor(3), "Page Faults: %s", UI::Format::formatCountPerSecond(faultData[*idxVal]).c_str());
+                        std::vector<UI::Widgets::TooltipRow> rows{
+                            {.label = THREADS_LABEL,
+                             .color = theme.scheme().chartCpu,
+                             .value = UI::Format::formatIntLocalized(std::llround(threadData[*idxVal]))},
+                            {.label = handleLabel,
+                             .color = theme.scheme().chartMemory,
+                             .value = UI::Format::formatIntLocalized(std::llround(handleData[*idxVal]))},
+                            {.label = FAULTS_LABEL,
+                             .color = theme.accentColor(3),
+                             .value = UI::Format::formatCountPerSecond(faultData[*idxVal])},
+                        };
 #ifdef _WIN32
                         if (hasGdiSamples)
                         {
                             const auto gdiValue = Detail::seriesValueAt(gdiData, gdiTimeOffset, *idxVal);
-                            ImGui::TextColored(theme.accentColor(4),
-                                               "GDI Objects: %s",
-                                               gdiValue ? UI::Format::formatIntLocalized(std::llround(*gdiValue)).c_str() : "N/A");
+                            rows.push_back(
+                                {.label = GDI_LABEL,
+                                 .color = theme.accentColor(4),
+                                 .value = gdiValue ? UI::Format::formatIntLocalized(std::llround(*gdiValue)) : std::string("N/A")});
                         }
 #endif
-                        ImGui::EndTooltip();
+                        UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                     }
                 }
             }
@@ -1308,13 +1341,13 @@ void ProcessDetailsPanel::renderIoStats(const Domain::ProcessSnapshot& proc, UI:
     const auto writeUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.ioWriteBytesPerSec);
 
     const NowBar readBar{.valueText = UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.ioReadBytesPerSec, readUnit),
-                         .label = "Disk Read",
+                         .label = IO_READ_LABEL,
                          .tooltipText = {},
                          .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.ioReadBytesPerSec, ioAxisUpper),
                          .color = theme.scheme().chartIo};
 
     const NowBar writeBar{.valueText = UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.ioWriteBytesPerSec, writeUnit),
-                          .label = "Disk Write",
+                          .label = IO_WRITE_LABEL,
                           .tooltipText = {},
                           .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.ioWriteBytesPerSec, ioAxisUpper),
                           .color = theme.scheme().chartIoWrite};
@@ -1331,7 +1364,7 @@ void ProcessDetailsPanel::renderIoStats(const Domain::ProcessSnapshot& proc, UI:
         {
             UI::Widgets::drawCollectingHint(alignedCount);
             const int plotCount = UI::Format::checkedCount(alignedCount);
-            plotLineWithFill("Read",
+            plotLineWithFill(IO_READ_LABEL,
                              timeData.data(),
                              readData.data(),
                              plotCount,
@@ -1341,7 +1374,7 @@ void ProcessDetailsPanel::renderIoStats(const Domain::ProcessSnapshot& proc, UI:
                              true,
                              UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
 
-            plotLineWithFill("Write",
+            plotLineWithFill(IO_WRITE_LABEL,
                              timeData.data(),
                              writeData.data(),
                              plotCount,
@@ -1358,14 +1391,15 @@ void ProcessDetailsPanel::renderIoStats(const Domain::ProcessSnapshot& proc, UI:
                 {
                     if (*idxVal < alignedCount)
                     {
-                        ImGui::BeginTooltip();
-                        const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                        ImGui::TextUnformatted(ageText.c_str());
-                        ImGui::Separator();
-                        ImGui::TextColored(theme.scheme().chartIo, "Read: %s", UI::Format::formatBytesPerSec(readData[*idxVal]).c_str());
-                        ImGui::TextColored(
-                            theme.scheme().chartIoWrite, "Write: %s", UI::Format::formatBytesPerSec(writeData[*idxVal]).c_str());
-                        ImGui::EndTooltip();
+                        const std::array rows{
+                            UI::Widgets::TooltipRow{.label = IO_READ_LABEL,
+                                                    .color = theme.scheme().chartIo,
+                                                    .value = UI::Format::formatBytesPerSec(readData[*idxVal])},
+                            UI::Widgets::TooltipRow{.label = IO_WRITE_LABEL,
+                                                    .color = theme.scheme().chartIoWrite,
+                                                    .value = UI::Format::formatBytesPerSec(writeData[*idxVal])},
+                        };
+                        UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                     }
                 }
             }
@@ -1411,16 +1445,14 @@ void ProcessDetailsPanel::renderNetworkStats(const Domain::ProcessSnapshot& proc
     const auto recvUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.netRecvBytesPerSec);
 
     const NowBar sentBar{.valueText = UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.netSentBytesPerSec, sentUnit),
-                         .label = "Network Sent",
-                         .tooltipText = std::format("Avg Sent Rate: {}",
-                                                    UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.netSentBytesPerSec, sentUnit)),
+                         .label = NET_SENT_LABEL,
+                         .tooltipText = {},
                          .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.netSentBytesPerSec, netAxisUpper),
                          .color = theme.scheme().chartNetTx};
 
     const NowBar recvBar{.valueText = UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.netRecvBytesPerSec, recvUnit),
-                         .label = "Network Received",
-                         .tooltipText = std::format("Avg Received Rate: {}",
-                                                    UI::Format::formatBytesPerSecWithUnit(m_SmoothedUsage.netRecvBytesPerSec, recvUnit)),
+                         .label = NET_RECV_LABEL,
+                         .tooltipText = {},
                          .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.netRecvBytesPerSec, netAxisUpper),
                          .color = theme.scheme().chartNetRx};
 
@@ -1436,7 +1468,7 @@ void ProcessDetailsPanel::renderNetworkStats(const Domain::ProcessSnapshot& proc
         {
             UI::Widgets::drawCollectingHint(alignedCount);
             const int plotCount = UI::Format::checkedCount(alignedCount);
-            plotLineWithFill("Sent",
+            plotLineWithFill(NET_SENT_LABEL,
                              timeData.data(),
                              sentData.data(),
                              plotCount,
@@ -1446,7 +1478,7 @@ void ProcessDetailsPanel::renderNetworkStats(const Domain::ProcessSnapshot& proc
                              true,
                              UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
 
-            plotLineWithFill("Received",
+            plotLineWithFill(NET_RECV_LABEL,
                              timeData.data(),
                              recvData.data(),
                              plotCount,
@@ -1463,15 +1495,16 @@ void ProcessDetailsPanel::renderNetworkStats(const Domain::ProcessSnapshot& proc
                 {
                     if (*idxVal < alignedCount)
                     {
-                        ImGui::BeginTooltip();
-                        const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                        ImGui::TextUnformatted(ageText.c_str());
-                        ImGui::Separator();
-                        ImGui::TextColored(
-                            theme.scheme().chartNetTx, "Avg Sent: %s", UI::Format::formatBytesPerSec(sentData[*idxVal]).c_str());
-                        ImGui::TextColored(
-                            theme.scheme().chartNetRx, "Avg Received: %s", UI::Format::formatBytesPerSec(recvData[*idxVal]).c_str());
-                        ImGui::EndTooltip();
+                        // Averages since the process was first seen, as the chart's heading says.
+                        const std::array rows{
+                            UI::Widgets::TooltipRow{.label = NET_SENT_LABEL,
+                                                    .color = theme.scheme().chartNetTx,
+                                                    .value = UI::Format::formatBytesPerSec(sentData[*idxVal])},
+                            UI::Widgets::TooltipRow{.label = NET_RECV_LABEL,
+                                                    .color = theme.scheme().chartNetRx,
+                                                    .value = UI::Format::formatBytesPerSec(recvData[*idxVal])},
+                        };
+                        UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                     }
                 }
             }
@@ -1515,7 +1548,7 @@ void ProcessDetailsPanel::renderPowerUsage(const Domain::ProcessSnapshot& proc, 
         "##ProcPowerHistory", UI::Widgets::maxOfSeries(powerData), UI::Widgets::RATE_AXIS_MIN_SPAN_WATTS);
 
     const NowBar powerBar{.valueText = UI::Format::formatPowerOrZero(m_SmoothedUsage.powerWatts),
-                          .label = "Power Usage",
+                          .label = POWER_LABEL,
                           .tooltipText = {},
                           .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.powerWatts, powerAxisUpper),
                           .color = theme.scheme().textInfo};
@@ -1532,7 +1565,7 @@ void ProcessDetailsPanel::renderPowerUsage(const Domain::ProcessSnapshot& proc, 
             if (!powerData.empty())
             {
                 plotLineWithFill(
-                    "Power", timeData.data(), powerData.data(), UI::Format::checkedCount(powerData.size()), theme.scheme().textInfo);
+                    POWER_LABEL, timeData.data(), powerData.data(), UI::Format::checkedCount(powerData.size()), theme.scheme().textInfo);
 
                 if (ImPlot::IsPlotHovered())
                 {
@@ -1541,13 +1574,10 @@ void ProcessDetailsPanel::renderPowerUsage(const Domain::ProcessSnapshot& proc, 
                     {
                         if (*idxVal < powerData.size())
                         {
-                            ImGui::BeginTooltip();
-                            const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                            ImGui::TextUnformatted(ageText.c_str());
-                            ImGui::Separator();
-                            ImGui::TextColored(
-                                theme.scheme().textInfo, "Power: %s", UI::Format::formatPowerOrZero(powerData[*idxVal]).c_str());
-                            ImGui::EndTooltip();
+                            const std::array rows{UI::Widgets::TooltipRow{.label = POWER_LABEL,
+                                                                          .color = theme.scheme().textInfo,
+                                                                          .value = UI::Format::formatPowerOrZero(powerData[*idxVal])}};
+                            UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                         }
                     }
                 }
@@ -1808,7 +1838,7 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
                 UI::Widgets::drawCollectingHint(alignedCount);
                 if (plotCount > 0)
                 {
-                    plotLineWithFill("GPU %",
+                    plotLineWithFill(GPU_UTIL_LABEL,
                                      timeData.data(),
                                      gpuUtilVec.data(),
                                      plotCount,
@@ -1826,21 +1856,18 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
                         {
                             if (*idxVal < alignedCount)
                             {
-                                ImGui::BeginTooltip();
-                                const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                                ImGui::TextUnformatted(ageText.c_str());
-                                ImGui::Separator();
-                                ImGui::TextColored(theme.scheme().gpuUtilization,
-                                                   "GPU: %s",
-                                                   UI::Format::percentCompact(static_cast<double>(gpuUtilVec[*idxVal])).c_str());
-                                ImGui::EndTooltip();
+                                const std::array rows{
+                                    UI::Widgets::TooltipRow{.label = GPU_UTIL_LABEL,
+                                                            .color = theme.scheme().gpuUtilization,
+                                                            .value = UI::Format::percentCompact(static_cast<double>(gpuUtilVec[*idxVal]))}};
+                                UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                             }
                         }
                     }
                 }
                 else
                 {
-                    ImPlot::PlotDummy("GPU %");
+                    ImPlot::PlotDummy(GPU_UTIL_LABEL);
                 }
             }
         };
@@ -1859,7 +1886,7 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
                 UI::Widgets::drawCollectingHint(alignedCount);
                 if (plotCount > 0)
                 {
-                    plotLineWithFill("GPU Memory",
+                    plotLineWithFill(GPU_MEMORY_LABEL,
                                      timeData.data(),
                                      gpuMemVec.data(),
                                      plotCount,
@@ -1877,13 +1904,10 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
                         {
                             if (*idxVal < alignedCount)
                             {
-                                ImGui::BeginTooltip();
-                                const auto ageText = formatAgeSeconds(timeData[*idxVal]);
-                                ImGui::TextUnformatted(ageText.c_str());
-                                ImGui::Separator();
-                                const std::string memStr = UI::Format::formatBytes(gpuMemVec[*idxVal]);
-                                ImGui::TextColored(theme.scheme().gpuMemory, "GPU Memory: %s", memStr.c_str());
-                                ImGui::EndTooltip();
+                                const std::array rows{UI::Widgets::TooltipRow{.label = GPU_MEMORY_LABEL,
+                                                                              .color = theme.scheme().gpuMemory,
+                                                                              .value = UI::Format::formatBytes(gpuMemVec[*idxVal])}};
+                                UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                             }
                         }
                     }
@@ -1898,7 +1922,7 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
         // Now bars for current values
         const NowBar gpuUtilBar{
             .valueText = UI::Format::percentCompact(m_SmoothedUsage.gpuUtilPercent),
-            .label = "GPU Utilization",
+            .label = GPU_UTIL_LABEL,
             .tooltipText = {},
             .value01 = m_SmoothedUsage.gpuUtilPercent / 100.0,
             .color = theme.scheme().gpuUtilization,
@@ -1906,7 +1930,7 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
 
         const NowBar gpuMemBar{
             .valueText = UI::Format::formatBytes(m_SmoothedUsage.gpuMemoryBytes),
-            .label = "GPU Memory",
+            .label = GPU_MEMORY_LABEL,
             .tooltipText = {},
             .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedUsage.gpuMemoryBytes, gpuMemAxisUpper),
             .color = theme.scheme().gpuMemory,

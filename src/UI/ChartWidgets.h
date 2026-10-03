@@ -174,6 +174,46 @@ inline std::string formatAgeSeconds(double relativeSeconds)
     return std::format("Age: {:.1f}s", ageSeconds);
 }
 
+/// One row of a history chart's hover tooltip: a series' label and colour -- the same ones its
+/// legend entry and NowBar use -- and its value at the hovered sample, already formatted ("N/A" for
+/// a sample with no reading; see formatSampleOrNA).
+struct TooltipRow
+{
+    std::string_view label;
+    ImVec4 color;
+    std::string value;
+};
+
+/// "label: value", the text of one tooltip row.
+[[nodiscard]] inline std::string formatTooltipRow(std::string_view label, std::string_view value)
+{
+    return std::format("{}: {}", label, value);
+}
+
+/// `format(value)`, or "N/A" for a non-finite value: a history sample with no reading is NaN.
+template<typename Format> [[nodiscard]] std::string formatSampleOrNA(double value, Format&& format)
+{
+    return std::isfinite(value) ? std::string(std::forward<Format>(format)(value)) : std::string("N/A");
+}
+
+/// The tooltip every history chart shows on hover (#1020): the hovered sample's age, a separator,
+/// then one "label: value" row per series in that series' colour. Charts used to write this out by
+/// hand, and the copies drifted -- whole-second ages, colours matching nothing on the chart, series
+/// left out, labels different from the legend's.
+inline void renderHistoryTooltip(double relativeSeconds, std::span<const TooltipRow> rows)
+{
+    ImGui::BeginTooltip();
+    const std::string age = formatAgeSeconds(relativeSeconds);
+    ImGui::TextUnformatted(age.c_str());
+    ImGui::Separator();
+    for (const auto& row : rows)
+    {
+        const std::string text = formatTooltipRow(row.label, row.value);
+        ImGui::TextColored(row.color, "%s", text.c_str());
+    }
+    ImGui::EndTooltip();
+}
+
 /// Calls `onRun(start, length)` for each maximal run of finite values in `values[0, count)`.
 ///
 /// NaN marks a sample with no reading. Splitting a series into its finite runs is how a gap is drawn
@@ -1022,6 +1062,19 @@ rateHistoryConfig(const char* id, double xMin, double xMax, ImPlotFormatter yFor
     return showLegend ? configuredFlags : (configuredFlags | ImPlotFlags_NoLegend);
 }
 
+/// Set up a right-hand Y2 axis for a series with its own scale -- a rate drawn beside counts, say
+/// (#1024) -- from 0 to `upperBound`. Pass easedRateAxisUpperBound() for it, the value its NowBar
+/// is scaled to as well. Call right after constructing the HistoryChart, while it is active() and
+/// before plotting; then plot that series between ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2) and
+/// ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1).
+inline void setupSecondaryRateAxis(double upperBound, ImPlotFormatter formatter)
+{
+    // AuxDefault: no grid lines of its own, and Opposite, which puts its labels on the right.
+    ImPlot::SetupAxis(ImAxis_Y2, nullptr, ImPlotAxisFlags_AuxDefault | ImPlotAxisFlags_Lock | Y_AXIS_FLAGS_DEFAULT);
+    ImPlot::SetupAxisFormat(ImAxis_Y2, formatter);
+    ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, upperBound, ImPlotCond_Always);
+}
+
 /// RAII frame for every history chart in the app: pushes the chart font, begins the plot,
 /// and applies the shared legend/axis/format/limit setup so all charts look and behave
 /// identically. When the Render Metrics overlay is active it also captures this chart's
@@ -1116,18 +1169,6 @@ class HistoryChart
     [[nodiscard]] bool active() const noexcept
     {
         return m_Active;
-    }
-
-    /// Set up a right-hand Y2 axis for a series with its own scale -- a rate drawn beside counts, say
-    /// (#1024) -- from 0 to `upperBound`. Pass easedRateAxisUpperBound() for it, the value its NowBar
-    /// is scaled to as well. Call right after construction, while active(), before plotting; then plot
-    /// that series between ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2) and ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1).
-    static void setupSecondaryRateAxis(double upperBound, ImPlotFormatter formatter)
-    {
-        // AuxDefault: no grid lines of its own, and Opposite, which puts its labels on the right.
-        ImPlot::SetupAxis(ImAxis_Y2, nullptr, ImPlotAxisFlags_AuxDefault | ImPlotAxisFlags_Lock | Y_AXIS_FLAGS_DEFAULT);
-        ImPlot::SetupAxisFormat(ImAxis_Y2, formatter);
-        ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, upperBound, ImPlotCond_Always);
     }
 
   private:

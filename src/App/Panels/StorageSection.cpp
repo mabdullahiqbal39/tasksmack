@@ -15,6 +15,7 @@
 #include <implot.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -35,7 +36,6 @@ namespace
 using UI::Widgets::buildTimeAxis;
 using UI::Widgets::ChartGridConfig;
 using UI::Widgets::computeAlpha;
-using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::formatAxisBytesPerSec;
 using UI::Widgets::HISTORY_PLOT_HEIGHT_DEFAULT;
 using UI::Widgets::hoveredIndexFromPlotX;
@@ -49,6 +49,10 @@ using UI::Widgets::renderHistoryWithNowBars;
 using UI::Widgets::tailAlignedSpan;
 
 constexpr size_t STORAGE_NOW_BAR_COLUMNS = 2; // Read, Write
+
+// One label per series, shared by its legend entry, tooltip row and NowBar (#1008).
+constexpr const char* READ_LABEL = "Read";
+constexpr const char* WRITE_LABEL = "Write";
 
 // Narrowest a disk cell may get before the grid uses fewer columns instead, in ems.
 constexpr float MIN_DISK_CELL_WIDTH_EM = 30.0F;
@@ -109,8 +113,8 @@ void renderDiskCell(const std::string& deviceName,
                       .value01 = normalizeToUnitInterval(current, diskAxisUpper),
                       .color = color};
     };
-    const NowBar readBar = makeBar("Read", currentRead, theme.scheme().chartIo);
-    const NowBar writeBar = makeBar("Write", currentWrite, theme.scheme().chartIoWrite);
+    const NowBar readBar = makeBar(READ_LABEL, currentRead, theme.scheme().chartIo);
+    const NowBar writeBar = makeBar(WRITE_LABEL, currentWrite, theme.scheme().chartIoWrite);
 
     const float cellContentTop = ImGui::GetCursorPosY();
     ImGui::TextColored(theme.scheme().textPrimary, "%.*s", static_cast<int>(deviceName.size()), deviceName.data());
@@ -142,7 +146,7 @@ void renderDiskCell(const std::string& deviceName,
         if (chart.active())
         {
             const int count = UI::Format::checkedCount(timeData.size());
-            plotLineWithFill("Read",
+            plotLineWithFill(READ_LABEL,
                              timeData.data(),
                              readData.data(),
                              count,
@@ -151,7 +155,7 @@ void renderDiskCell(const std::string& deviceName,
                              2.0F,
                              true,
                              UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
-            plotLineWithFill("Write",
+            plotLineWithFill(WRITE_LABEL,
                              timeData.data(),
                              writeData.data(),
                              count,
@@ -168,16 +172,15 @@ void renderDiskCell(const std::string& deviceName,
                 {
                     if (*idxVal < timeData.size())
                     {
-                        ImGui::BeginTooltip();
-                        ImGui::TextUnformatted(formatAgeSeconds(static_cast<double>(timeData[*idxVal])).c_str());
-                        ImGui::Separator();
-                        ImGui::TextColored(theme.scheme().chartIo,
-                                           "Read: %s",
-                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(readData[*idxVal])).c_str());
-                        ImGui::TextColored(theme.scheme().chartIoWrite,
-                                           "Write: %s",
-                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(writeData[*idxVal])).c_str());
-                        ImGui::EndTooltip();
+                        const std::array rows{
+                            UI::Widgets::TooltipRow{.label = READ_LABEL,
+                                                    .color = theme.scheme().chartIo,
+                                                    .value = UI::Format::formatBytesPerSecOrNA(static_cast<double>(readData[*idxVal]))},
+                            UI::Widgets::TooltipRow{.label = WRITE_LABEL,
+                                                    .color = theme.scheme().chartIoWrite,
+                                                    .value = UI::Format::formatBytesPerSecOrNA(static_cast<double>(writeData[*idxVal]))},
+                        };
+                        UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                     }
                 }
             }
@@ -412,12 +415,12 @@ void renderStorageSection(RenderContext& ctx)
             "##SystemDiskHistory", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
         const NowBar readBar{.valueText = UI::Format::formatBytesPerSec(smoothedRead),
-                             .label = "Disk Read",
+                             .label = READ_LABEL,
                              .tooltipText = {},
                              .value01 = normalizeToUnitInterval(smoothedRead, diskAxisUpper),
                              .color = theme.scheme().chartIo};
         const NowBar writeBar{.valueText = UI::Format::formatBytesPerSec(smoothedWrite),
-                              .label = "Disk Write",
+                              .label = WRITE_LABEL,
                               .tooltipText = {},
                               .value01 = normalizeToUnitInterval(smoothedWrite, diskAxisUpper),
                               .color = theme.scheme().chartIoWrite};
@@ -433,7 +436,7 @@ void renderStorageSection(RenderContext& ctx)
             if (chart.active())
             {
                 const int count = UI::Format::checkedCount(alignedDisk);
-                plotLineWithFill("Read",
+                plotLineWithFill(READ_LABEL,
                                  aggregateTimes.data(),
                                  readData.data(),
                                  count,
@@ -442,7 +445,7 @@ void renderStorageSection(RenderContext& ctx)
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
-                plotLineWithFill("Write",
+                plotLineWithFill(WRITE_LABEL,
                                  aggregateTimes.data(),
                                  writeData.data(),
                                  count,
@@ -459,17 +462,15 @@ void renderStorageSection(RenderContext& ctx)
                     {
                         if (*idxVal < alignedDisk)
                         {
-                            ImGui::BeginTooltip();
-                            const auto ageText = formatAgeSeconds(static_cast<double>(aggregateTimes[*idxVal]));
-                            ImGui::TextUnformatted(ageText.c_str());
-                            ImGui::Separator();
-                            ImGui::TextColored(theme.scheme().chartIo,
-                                               "Read: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(readData[*idxVal])).c_str());
-                            ImGui::TextColored(theme.scheme().chartIoWrite,
-                                               "Write: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(writeData[*idxVal])).c_str());
-                            ImGui::EndTooltip();
+                            const std::array rows{
+                                UI::Widgets::TooltipRow{.label = READ_LABEL,
+                                                        .color = theme.scheme().chartIo,
+                                                        .value = UI::Format::formatBytesPerSec(static_cast<double>(readData[*idxVal]))},
+                                UI::Widgets::TooltipRow{.label = WRITE_LABEL,
+                                                        .color = theme.scheme().chartIoWrite,
+                                                        .value = UI::Format::formatBytesPerSec(static_cast<double>(writeData[*idxVal]))},
+                            };
+                            UI::Widgets::renderHistoryTooltip(aggregateTimes[*idxVal], rows);
                         }
                     }
                 }
