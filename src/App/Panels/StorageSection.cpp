@@ -90,8 +90,8 @@ void renderDiskCell(const std::string& deviceName,
     // same height (#1003). A per-disk series holds NaN for samples where the disk was absent, and
     // currentRead/Write are NaN when it is absent from the latest sample (#1015): maxOfSeries skips
     // them, and the bars show N/A rather than a false 0 B/s, as the GPU fan bar does.
-    const double diskAxisUpper =
-        UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+    const double diskAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##DiskAxis", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
     const auto makeBar = [&](const char* label, double current, const ImVec4& color)
     {
@@ -408,8 +408,8 @@ void renderStorageSection(RenderContext& ctx)
         }
 
         // One upper bound for the chart's Y axis and its bars (#1003).
-        const double diskAxisUpper =
-            UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+        const double diskAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+            "##SystemDiskHistory", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
         const NowBar readBar{.valueText = UI::Format::formatBytesPerSec(smoothedRead),
                              .label = "Disk Read",

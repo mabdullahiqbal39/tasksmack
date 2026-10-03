@@ -844,8 +844,8 @@ void SystemMetricsPanel::renderOverview()
             updateSmoothedPower(targetPower, targetBattery, m_LastDeltaSeconds);
 
             // One upper bound for the power axis and its bar, so the bar and line agree (#1003).
-            const double powerAxisUpper =
-                UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(powerHist), UI::Widgets::RATE_AXIS_MIN_SPAN_WATTS);
+            const double powerAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+                "##PowerBatteryHistory", UI::Widgets::maxOfSeries(powerHist), UI::Widgets::RATE_AXIS_MIN_SPAN_WATTS);
 
             // Build NowBars
             std::vector<NowBar> bars;
@@ -1123,10 +1123,10 @@ void SystemMetricsPanel::renderOverview()
         // Threads and handles are counts on the left axis; page faults are a rate, on their own
         // right-hand axis, so a fault spike no longer flattens the count lines (#1024). Each bar is
         // scaled to its series' axis, so a bar and its line show a value at the same height (#1003).
-        const double countAxisUpper =
-            UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(threadData, handleData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
-        const double faultAxisUpper =
-            UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(faultData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
+        const double countAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+            "##ResourcesHistory", UI::Widgets::maxOfSeries(threadData, handleData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
+        const double faultAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+            "##ResourcesHistory/Y2", UI::Widgets::maxOfSeries(faultData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
 
 #ifdef _WIN32
         constexpr const char* handleLabel = "Handles";

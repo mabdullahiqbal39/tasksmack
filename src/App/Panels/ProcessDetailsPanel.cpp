@@ -1118,9 +1118,10 @@ void ProcessDetailsPanel::renderThreadAndFaultHistory(UI::Widgets::FillPlotLayou
 #else
     const double countSeriesMax = UI::Widgets::maxOfSeries(threadData, handleData);
 #endif
-    const double countAxisUpper = UI::Widgets::rateAxisUpperBound(countSeriesMax, UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
-    const double faultAxisUpper =
-        UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(faultData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
+    const double countAxisUpper =
+        UI::Widgets::easedRateAxisUpperBound("##ProcThreadsFaults", countSeriesMax, UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
+    const double faultAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##ProcThreadsFaults/Y2", UI::Widgets::maxOfSeries(faultData), UI::Widgets::RATE_AXIS_MIN_SPAN_COUNT);
 
     const NowBar threadsBar{.valueText = UI::Format::formatCountWithLabel(std::llround(m_SmoothedUsage.threadCount), "threads"),
                             .label = "Threads",
@@ -1300,8 +1301,8 @@ void ProcessDetailsPanel::renderIoStats(const Domain::ProcessSnapshot& proc, UI:
 
     // Compare the smoothed current rates with history when scaling the NowBars,
     // so either a historical or newly observed peak remains representable.
-    const double ioAxisUpper =
-        UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+    const double ioAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##ProcIoHistory", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
     const auto readUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.ioReadBytesPerSec);
     const auto writeUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.ioWriteBytesPerSec);
@@ -1403,8 +1404,8 @@ void ProcessDetailsPanel::renderNetworkStats(const Domain::ProcessSnapshot& proc
 
     // Scale the NowBars against both the historical peak and smoothed current
     // value so a new traffic burst cannot exceed the normalized range.
-    const double netAxisUpper =
-        UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(sentData, recvData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+    const double netAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##ProcNetworkHistory", UI::Widgets::maxOfSeries(sentData, recvData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
     const auto sentUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.netSentBytesPerSec);
     const auto recvUnit = UI::Format::unitForBytesPerSecond(m_SmoothedUsage.netRecvBytesPerSec);
@@ -1510,8 +1511,8 @@ void ProcessDetailsPanel::renderPowerUsage(const Domain::ProcessSnapshot& proc, 
     std::vector<double> timeData = buildTimeAxisDoubles(timestamps, alignedCount, nowSeconds);
 
     // Use smoothed value for NowBar
-    const double powerAxisUpper =
-        UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(powerData), UI::Widgets::RATE_AXIS_MIN_SPAN_WATTS);
+    const double powerAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##ProcPowerHistory", UI::Widgets::maxOfSeries(powerData), UI::Widgets::RATE_AXIS_MIN_SPAN_WATTS);
 
     const NowBar powerBar{.valueText = UI::Format::formatPowerOrZero(m_SmoothedUsage.powerWatts),
                           .label = "Power Usage",
@@ -1845,8 +1846,8 @@ void ProcessDetailsPanel::renderGpuHistoryGraphs(UI::Widgets::FillPlotLayout& fi
         };
 
         // GPU Memory graph. One upper bound for its axis and its bar, so they agree (#1003).
-        const double gpuMemAxisUpper =
-            UI::Widgets::rateAxisUpperBound(UI::Widgets::maxOfSeries(gpuMemVec), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES);
+        const double gpuMemAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+            "##GPUMemPlot", UI::Widgets::maxOfSeries(gpuMemVec), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES);
         auto plotGpuMem = [&]()
         {
             const UI::Widgets::HistoryChart chart(UI::Widgets::withHeight(

@@ -940,11 +940,9 @@ struct HistoryChartConfig
 }
 
 /// Config for a non-negative history chart (rates, counts, watts): Y axis pinned to 0 at the bottom
-/// and sized to the data above, never collapsing below `minSpan`.
-///
-/// `dataMax` is the largest value plotted in the window -- use maxOfSeries() over the same series
-/// being plotted. See rateAxisUpperBound() in RateAxis.h for why the limits are computed here
-/// rather than left to ImPlot's auto-fit or its axis constraints.
+/// and drawn up to `upperBound` exactly -- pass easedRateAxisUpperBound(), the bound the chart's
+/// NowBars are scaled to as well. See rateAxisUpperBound() in RateAxis.h for why the limits are
+/// computed rather than left to ImPlot's auto-fit or its axis constraints.
 [[nodiscard]] inline HistoryChartConfig
 rateHistoryConfigWithUpper(const char* id, double xMin, double xMax, ImPlotFormatter yFormatter, double upperBound)
 {
@@ -954,18 +952,20 @@ rateHistoryConfigWithUpper(const char* id, double xMin, double xMax, ImPlotForma
     cfg.xMax = xMax;
     cfg.yFormatter = yFormatter;
     cfg.yLimits = std::pair{0.0, upperBound};
-    cfg.easeYUpper = true;
+    // Already the bound to draw (easedRateAxisUpperBound), so HistoryChart does not ease it again.
+    cfg.easeYUpper = false;
     return cfg;
 }
 
-/// rateHistoryConfigWithUpper() with the upper bound computed from the data (rateAxisUpperBound).
-/// A chart that also has NowBars should compute the bound once, pass it here through
-/// rateHistoryConfigWithUpper(), and normalise its bars against the same value
-/// (normalizeToUnitInterval), so a bar and its line show a value at the same height (#1003).
+/// A rate chart config whose upper bound comes from the data (rateAxisUpperBound) and is eased by
+/// HistoryChart itself. A chart that also has NowBars should use easedRateAxisUpperBound() and
+/// rateHistoryConfigWithUpper() instead, so its bars are scaled to the same per-frame bound (#1003).
 [[nodiscard]] inline HistoryChartConfig
 rateHistoryConfig(const char* id, double xMin, double xMax, ImPlotFormatter yFormatter, double dataMax, double minSpan)
 {
-    return rateHistoryConfigWithUpper(id, xMin, xMax, yFormatter, rateAxisUpperBound(dataMax, minSpan));
+    HistoryChartConfig cfg = rateHistoryConfigWithUpper(id, xMin, xMax, yFormatter, rateAxisUpperBound(dataMax, minSpan));
+    cfg.easeYUpper = true;
+    return cfg;
 }
 
 /// The Y upper bound a HistoryChart with easeYUpper draws this frame: its previous frame's bound
@@ -974,14 +974,9 @@ rateHistoryConfig(const char* id, double xMin, double xMax, ImPlotFormatter yFor
 /// than easing in from a stale value.
 [[nodiscard]] inline double easedChartUpperBound(ImGuiID chartId, double target)
 {
-    struct Eased
-    {
-        double value = 0.0;
-        int lastFrame = -1;
-    };
     // UI thread only, like everything else in ImGui. Bounded: one entry per chart ID ever drawn, and
     // entries not drawn for a while are dropped once there are many (per-disk charts come and go).
-    static std::unordered_map<ImGuiID, Eased> state;
+    static std::unordered_map<ImGuiID, EasedBound> state;
     static int lastPruneFrame = -1;
     constexpr std::size_t PRUNE_ABOVE = 256;
     constexpr int STALE_FRAMES = 600;
@@ -994,11 +989,20 @@ rateHistoryConfig(const char* id, double xMin, double xMax, ImPlotFormatter yFor
         lastPruneFrame = frame;
         std::erase_if(state, [frame](const auto& entry) { return (frame - entry.second.lastFrame) > STALE_FRAMES; });
     }
-    auto& entry = state[chartId];
-    const bool continuing = entry.lastFrame == frame - 1;
-    entry.value = continuing ? easeAxisUpperBound(entry.value, target, static_cast<double>(ImGui::GetIO().DeltaTime)) : target;
-    entry.lastFrame = frame;
-    return entry.value;
+    return stepEasedBound(state[chartId], target, frame, static_cast<double>(ImGui::GetIO().DeltaTime));
+}
+
+/// The Y upper bound a rate chart draws this frame, for its axis *and* its NowBars (#1003): the bound
+/// rateAxisUpperBound() gives for the data, eased toward over a few frames (#1011). Computing it once
+/// and passing the result to both -- rateHistoryConfigWithUpper() for the axis, normalizeToUnitInterval()
+/// for the bars -- is what keeps a bar level with its line while the axis is still easing; the bars
+/// used to scale to the target while the axis drew the eased value.
+///
+/// @param key  Names the chart's easing state, unique within the current ImGui ID scope: the chart's
+///             own ID (e.g. "##ProcIoHistory"), plus a suffix for a second axis ("##.../Y2").
+[[nodiscard]] inline double easedRateAxisUpperBound(const char* key, double dataMax, double minSpan)
+{
+    return easedChartUpperBound(ImGui::GetID(key), rateAxisUpperBound(dataMax, minSpan));
 }
 
 /// Maps the config's Y policy to ImPlot axis flags: locked range vs auto-fit.
@@ -1047,7 +1051,6 @@ class HistoryChart
         // here because ImPlot's public API has no accessor for it once the plot has begun. Scoped by
         // the caller's PushID, so same-label charts in different scopes ease separately.
         const ImGuiID plotId = ImGui::GetID(config.id);
-        m_PlotId = plotId;
         m_Active = ImPlot::BeginPlot(config.id, ImVec2(-1, config.height), historyChartBeginPlotFlags(config.flags, config.showLegend));
         if (!m_Active)
         {
@@ -1116,19 +1119,15 @@ class HistoryChart
     }
 
     /// Set up a right-hand Y2 axis for a series with its own scale -- a rate drawn beside counts, say
-    /// (#1024) -- pinned to 0 and eased toward `upperBound` like the primary rate axis. Call right
-    /// after construction, while active(), before plotting; then plot that series between
-    /// ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2) and ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1).
-    void setupSecondaryRateAxis(double upperBound, ImPlotFormatter formatter) const
+    /// (#1024) -- from 0 to `upperBound`. Pass easedRateAxisUpperBound() for it, the value its NowBar
+    /// is scaled to as well. Call right after construction, while active(), before plotting; then plot
+    /// that series between ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2) and ImPlot::SetAxes(ImAxis_X1, ImAxis_Y1).
+    static void setupSecondaryRateAxis(double upperBound, ImPlotFormatter formatter)
     {
-        // Eased under its own key: the plot's ID mixed with a constant, so it never shares state
-        // with the primary axis (keyed by the plot ID itself).
-        constexpr ImGuiID SECONDARY_AXIS_KEY_SALT = 0x9E3779B9U;
-        const double upper = easedChartUpperBound(m_PlotId ^ SECONDARY_AXIS_KEY_SALT, upperBound);
         // AuxDefault: no grid lines of its own, and Opposite, which puts its labels on the right.
         ImPlot::SetupAxis(ImAxis_Y2, nullptr, ImPlotAxisFlags_AuxDefault | ImPlotAxisFlags_Lock | Y_AXIS_FLAGS_DEFAULT);
         ImPlot::SetupAxisFormat(ImAxis_Y2, formatter);
-        ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, upper, ImPlotCond_Always);
+        ImPlot::SetupAxisLimits(ImAxis_Y2, 0.0, upperBound, ImPlotCond_Always);
     }
 
   private:
@@ -1140,7 +1139,6 @@ class HistoryChart
     ImDrawListFlags m_SavedDrawListFlags = 0;
     bool m_Measure = false;
     bool m_Active = false;
-    ImGuiID m_PlotId = 0;
     bool m_AntiAliasingOverridden = false;
 };
 
