@@ -31,7 +31,6 @@ namespace
 using UI::Widgets::buildTimeAxis;
 using UI::Widgets::ChartGridConfig;
 using UI::Widgets::computeAlpha;
-using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::hoveredIndexFromPlotX;
 using UI::Widgets::initializeOrSmooth;
 using UI::Widgets::makeTimeAxisConfig;
@@ -222,7 +221,11 @@ void renderCpuCoresSection(RenderContext& ctx)
                             const auto& themeRef = theme;
                             const auto& axisCfg = axisConfig;
 
-                            auto plotFn = [&timeData, &sampleData, &themeRef, &axisCfg, &coreLabel, plotHeight]()
+                            // The core's name, shared by its tooltip row and NowBar (#1008); the tooltip
+                            // used to say "CPU:" whichever core it was over.
+                            const std::string coreName = std::format("Core {}", coreIdx);
+
+                            auto plotFn = [&timeData, &sampleData, &themeRef, &axisCfg, &coreLabel, &coreName, plotHeight]()
                             {
                                 // coreLabel.c_str() (not a constant "##PerCorePlot"), so RenderMetrics
                                 // records a distinct entry per core instead of collapsing every core's
@@ -255,18 +258,15 @@ void renderCpuCoresSection(RenderContext& ctx)
                                         const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
                                         if (const auto idxVal = hoveredIndexFromPlotX(timeData, mouse.x))
                                         {
-                                            ImGui::BeginTooltip();
-                                            const auto ageText = formatAgeSeconds(static_cast<double>(timeData[*idxVal]));
-                                            ImGui::TextUnformatted(ageText.c_str());
-                                            ImGui::Separator();
+                                            std::vector<UI::Widgets::TooltipRow> rows;
                                             if (*idxVal < sampleData.size())
                                             {
-                                                ImGui::TextColored(
-                                                    themeRef.scheme().chartCpu,
-                                                    "CPU: %s",
-                                                    UI::Format::percentCompact(static_cast<double>(sampleData[*idxVal])).c_str());
+                                                rows.push_back(
+                                                    {.label = coreName,
+                                                     .color = themeRef.scheme().chartCpu,
+                                                     .value = UI::Format::percentCompact(static_cast<double>(sampleData[*idxVal]))});
                                             }
-                                            ImGui::EndTooltip();
+                                            UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                                         }
                                     }
                                 }
@@ -276,7 +276,7 @@ void renderCpuCoresSection(RenderContext& ctx)
                                                       ? (*ctx.smoothedPerCore)[coreIdx]
                                                       : snap.cpuPerCore[coreIdx].totalPercent;
                             const NowBar bar{.valueText = UI::Format::percentCompact(smoothed),
-                                             .label = std::format("Core {}", coreIdx),
+                                             .label = coreName,
                                              .tooltipText = {},
                                              .value01 = UI::Format::percent01(smoothed),
                                              .color = theme.progressColor(smoothed)};

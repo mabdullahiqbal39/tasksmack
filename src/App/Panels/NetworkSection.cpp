@@ -32,7 +32,6 @@ namespace
 
 using UI::Widgets::buildTimeAxis;
 using UI::Widgets::computeAlpha;
-using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::formatAxisBytesPerSec;
 using UI::Widgets::HISTORY_PLOT_HEIGHT_DEFAULT;
 using UI::Widgets::hoveredIndexFromPlotX;
@@ -57,6 +56,12 @@ void updateSmoothedNetwork(double targetSent, double targetRecv, float deltaTime
     *ctx.smoothedNetRecvBytesPerSec = initializeOrSmooth(*ctx.smoothedNetRecvBytesPerSec, targetRecv, alpha, initialized);
     *ctx.smoothedNetInitialized = true;
 }
+
+// One label per series, shared by its legend entry, tooltip row and NowBar (#1008).
+constexpr const char* TOTAL_SENT_LABEL = "Sent";
+constexpr const char* TOTAL_RECV_LABEL = "Received";
+constexpr const char* TOTAL_SENT_BEHIND_LABEL = "Sent (Total)";
+constexpr const char* TOTAL_RECV_BEHIND_LABEL = "Received (Total)";
 
 } // namespace
 
@@ -269,8 +274,12 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
     // Determine labels based on selection
     // Name the interface the way the picker above does (#1009).
     const std::string ifaceDisplayName = showingInterface ? interfaceNames[static_cast<size_t>(selectedInterface) + 1] : "Network";
-    const std::string sentBarLabel = showingInterface ? std::format("{} Sent", ifaceDisplayName) : "Network Sent";
-    const std::string recvBarLabel = showingInterface ? std::format("{} Received", ifaceDisplayName) : "Network Received";
+    // One label per series, shared by its legend entry, tooltip row and NowBar (#1008). The bars show
+    // the selected interface when there is one, else the totals.
+    const std::string ifaceSentLabel = std::format("{} Sent", ifaceDisplayName);
+    const std::string ifaceRecvLabel = std::format("{} Received", ifaceDisplayName);
+    const std::string sentBarLabel = showingInterface ? ifaceSentLabel : std::string(TOTAL_SENT_LABEL);
+    const std::string recvBarLabel = showingInterface ? ifaceRecvLabel : std::string(TOTAL_RECV_LABEL);
 
     const NowBar sentBar{.valueText = UI::Format::formatBytesPerSec(smoothedSent),
                          .label = sentBarLabel,
@@ -316,7 +325,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
             if (usingInterfaceHistory)
             {
                 // Total lines (muted, in background)
-                plotLineWithFill("Sent (Total)",
+                plotLineWithFill(TOTAL_SENT_BEHIND_LABEL,
                                  netTimes.data(),
                                  sentData.data(),
                                  count,
@@ -325,7 +334,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
-                plotLineWithFill("Received (Total)",
+                plotLineWithFill(TOTAL_RECV_BEHIND_LABEL,
                                  netTimes.data(),
                                  recvData.data(),
                                  count,
@@ -336,8 +345,6 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
 
                 // Interface-specific lines (bright, in foreground)
-                const auto ifaceSentLabel = std::format("{} Sent", ifaceDisplayName);
-                const auto ifaceRecvLabel = std::format("{} Received", ifaceDisplayName);
                 plotLineWithFill(ifaceSentLabel.c_str(),
                                  netTimes.data(),
                                  ifaceSentData.data(),
@@ -360,7 +367,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
             else
             {
                 // Just total
-                plotLineWithFill("Sent",
+                plotLineWithFill(TOTAL_SENT_LABEL,
                                  netTimes.data(),
                                  sentData.data(),
                                  count,
@@ -369,7 +376,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
-                plotLineWithFill("Received",
+                plotLineWithFill(TOTAL_RECV_LABEL,
                                  netTimes.data(),
                                  recvData.data(),
                                  count,
@@ -387,39 +394,28 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
                 {
                     if (*idxVal < aligned)
                     {
-                        ImGui::BeginTooltip();
-                        const auto ageText = formatAgeSeconds(static_cast<double>(netTimes[*idxVal]));
-                        ImGui::TextUnformatted(ageText.c_str());
-                        ImGui::Separator();
+                        const auto rate = [](float value)
+                        {
+                            return UI::Format::formatBytesPerSecOrNA(static_cast<double>(value));
+                        };
+                        std::vector<UI::Widgets::TooltipRow> rows;
                         if (usingInterfaceHistory)
                         {
-                            // Show both total and interface values
-                            ImGui::TextColored(theme.scheme().textMuted, "Total:");
-                            ImGui::TextColored(ifaceSentColor,
-                                               "  Sent: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(sentData[*idxVal])).c_str());
-                            ImGui::TextColored(ifaceRecvColor,
-                                               "  Received: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(recvData[*idxVal])).c_str());
-                            ImGui::Spacing();
-                            ImGui::TextColored(theme.scheme().textPrimary, "%s:", ifaceDisplayName.c_str());
-                            ImGui::TextColored(theme.scheme().chartNetTx,
-                                               "  Sent: %s",
-                                               UI::Format::formatBytesPerSecOrNA(static_cast<double>(ifaceSentData[*idxVal])).c_str());
-                            ImGui::TextColored(theme.scheme().chartNetRx,
-                                               "  Received: %s",
-                                               UI::Format::formatBytesPerSecOrNA(static_cast<double>(ifaceRecvData[*idxVal])).c_str());
+                            rows.push_back(
+                                {.label = ifaceSentLabel, .color = theme.scheme().chartNetTx, .value = rate(ifaceSentData[*idxVal])});
+                            rows.push_back(
+                                {.label = ifaceRecvLabel, .color = theme.scheme().chartNetRx, .value = rate(ifaceRecvData[*idxVal])});
+                            rows.push_back({.label = TOTAL_SENT_BEHIND_LABEL, .color = ifaceSentColor, .value = rate(sentData[*idxVal])});
+                            rows.push_back({.label = TOTAL_RECV_BEHIND_LABEL, .color = ifaceRecvColor, .value = rate(recvData[*idxVal])});
                         }
                         else
                         {
-                            ImGui::TextColored(theme.scheme().chartNetTx,
-                                               "Sent: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(sentData[*idxVal])).c_str());
-                            ImGui::TextColored(theme.scheme().chartNetRx,
-                                               "Received: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(recvData[*idxVal])).c_str());
+                            rows.push_back(
+                                {.label = TOTAL_SENT_LABEL, .color = theme.scheme().chartNetTx, .value = rate(sentData[*idxVal])});
+                            rows.push_back(
+                                {.label = TOTAL_RECV_LABEL, .color = theme.scheme().chartNetRx, .value = rate(recvData[*idxVal])});
                         }
-                        ImGui::EndTooltip();
+                        UI::Widgets::renderHistoryTooltip(netTimes[*idxVal], rows);
                     }
                 }
             }

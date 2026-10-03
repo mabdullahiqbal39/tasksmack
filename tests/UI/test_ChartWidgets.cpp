@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <format>
 #include <limits>
 #include <span>
 #include <string>
@@ -614,6 +615,25 @@ TEST(ChartWidgetsFormattersTest, FormatAxisBytesPerSecHandlesMegaAndGigaSuffixes
     len = formatAxisBytesPerSec(2.0 * 1024.0 * 1024.0 * 1024.0, buf, static_cast<int>(sizeof(buf)), nullptr);
     EXPECT_GT(len, 0);
     EXPECT_EQ(std::string(buf), "2.0GB/s");
+}
+
+// ========== Tooltip rows (#1008, #1020) ==========
+
+TEST(ChartWidgetsTest, TooltipRowIsLabelColonValue)
+{
+    EXPECT_EQ(formatTooltipRow("Read", "1.5 MB/s"), "Read: 1.5 MB/s");
+    EXPECT_EQ(formatTooltipRow("Page Faults/s", "12/s"), "Page Faults/s: 12/s");
+}
+
+TEST(ChartWidgetsTest, SampleWithNoReadingFormatsAsNA)
+{
+    const auto percent = [](double v)
+    {
+        return std::format("{:.0f}%", v);
+    };
+    EXPECT_EQ(formatSampleOrNA(42.0, percent), "42%");
+    EXPECT_EQ(formatSampleOrNA(std::numeric_limits<double>::quiet_NaN(), percent), "N/A");
+    EXPECT_EQ(formatSampleOrNA(std::numeric_limits<double>::infinity(), percent), "N/A");
 }
 
 // ========== normalizeToUnitInterval ==========

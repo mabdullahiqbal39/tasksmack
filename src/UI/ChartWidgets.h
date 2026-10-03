@@ -174,6 +174,46 @@ inline std::string formatAgeSeconds(double relativeSeconds)
     return std::format("Age: {:.1f}s", ageSeconds);
 }
 
+/// One row of a history chart's hover tooltip: a series' label and colour -- the same ones its
+/// legend entry and NowBar use -- and its value at the hovered sample, already formatted ("N/A" for
+/// a sample with no reading; see formatSampleOrNA).
+struct TooltipRow
+{
+    std::string_view label;
+    ImVec4 color;
+    std::string value;
+};
+
+/// "label: value", the text of one tooltip row.
+[[nodiscard]] inline std::string formatTooltipRow(std::string_view label, std::string_view value)
+{
+    return std::format("{}: {}", label, value);
+}
+
+/// `format(value)`, or "N/A" for a non-finite value: a history sample with no reading is NaN.
+template<typename Format> [[nodiscard]] std::string formatSampleOrNA(double value, Format&& format)
+{
+    return std::isfinite(value) ? std::string(std::forward<Format>(format)(value)) : std::string("N/A");
+}
+
+/// The tooltip every history chart shows on hover (#1020): the hovered sample's age, a separator,
+/// then one "label: value" row per series in that series' colour. Charts used to write this out by
+/// hand, and the copies drifted -- whole-second ages, colours matching nothing on the chart, series
+/// left out, labels different from the legend's.
+inline void renderHistoryTooltip(double relativeSeconds, std::span<const TooltipRow> rows)
+{
+    ImGui::BeginTooltip();
+    const std::string age = formatAgeSeconds(relativeSeconds);
+    ImGui::TextUnformatted(age.c_str());
+    ImGui::Separator();
+    for (const auto& row : rows)
+    {
+        const std::string text = formatTooltipRow(row.label, row.value);
+        ImGui::TextColored(row.color, "%s", text.c_str());
+    }
+    ImGui::EndTooltip();
+}
+
 /// Calls `onRun(start, length)` for each maximal run of finite values in `values[0, count)`.
 ///
 /// NaN marks a sample with no reading. Splitting a series into its finite runs is how a gap is drawn

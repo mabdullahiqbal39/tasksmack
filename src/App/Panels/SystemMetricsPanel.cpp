@@ -32,6 +32,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -53,7 +54,6 @@ namespace
 {
 
 using UI::Widgets::computeAlpha;
-using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::formatAxisLocalized;
 using UI::Widgets::formatAxisWatts;
 using UI::Widgets::plotLineWithFill;
@@ -98,6 +98,18 @@ using UI::Widgets::renderHistoryWithNowBars;
 ///
 /// Total is 100 - idle, so it includes irq, softirq and steal time that the User/System/I/O Wait
 /// bands do not; showing it is what makes the tooltip agree with the Total line and the Total bar.
+// One label per series, shared by its legend entry, tooltip row and NowBar (#1008).
+constexpr const char* CPU_TOTAL_LABEL = "Total";
+constexpr const char* CPU_USER_LABEL = "User";
+constexpr const char* CPU_SYSTEM_LABEL = "System";
+constexpr const char* CPU_IOWAIT_LABEL = "I/O Wait";
+constexpr const char* CPU_IDLE_LABEL = "Idle";
+constexpr const char* CPU_SINGLE_LABEL = "CPU";
+constexpr const char* POWER_LABEL = "Power";
+constexpr const char* BATTERY_LABEL = "Battery";
+constexpr const char* THREADS_LABEL = "Threads";
+constexpr const char* FAULTS_LABEL = "Page Faults/s";
+
 void showCpuBreakdownTooltip(const UI::ColorScheme& scheme,
                              double ageSeconds,
                              float totalPercent,
@@ -106,20 +118,18 @@ void showCpuBreakdownTooltip(const UI::ColorScheme& scheme,
                              std::optional<float> iowaitPercent,
                              float idlePercent)
 {
-    ImGui::BeginTooltip();
-    const auto ageText = formatAgeSeconds(ageSeconds);
-    ImGui::TextUnformatted(ageText.c_str());
-    ImGui::Separator();
-    ImGui::TextColored(scheme.chartCpu, "Total: %s", UI::Format::percentCompact(totalPercent).c_str());
-    ImGui::TextColored(scheme.cpuUser, "User: %s", UI::Format::percentCompact(userPercent).c_str());
-    ImGui::TextColored(scheme.cpuSystem, "System: %s", UI::Format::percentCompact(systemPercent).c_str());
+    std::vector<UI::Widgets::TooltipRow> rows{
+        {.label = CPU_TOTAL_LABEL, .color = scheme.chartCpu, .value = UI::Format::percentCompact(totalPercent)},
+        {.label = CPU_USER_LABEL, .color = scheme.cpuUser, .value = UI::Format::percentCompact(userPercent)},
+        {.label = CPU_SYSTEM_LABEL, .color = scheme.cpuSystem, .value = UI::Format::percentCompact(systemPercent)},
+    };
     // Absent, not 0 %, where the platform does not report it (Windows, #1031).
     if (iowaitPercent.has_value())
     {
-        ImGui::TextColored(scheme.cpuIowait, "I/O Wait: %s", UI::Format::percentCompact(*iowaitPercent).c_str());
+        rows.push_back({.label = CPU_IOWAIT_LABEL, .color = scheme.cpuIowait, .value = UI::Format::percentCompact(*iowaitPercent)});
     }
-    ImGui::TextColored(scheme.cpuIdle, "Idle: %s", UI::Format::percentCompact(idlePercent).c_str());
-    ImGui::EndTooltip();
+    rows.push_back({.label = CPU_IDLE_LABEL, .color = scheme.cpuIdle, .value = UI::Format::percentCompact(idlePercent)});
+    UI::Widgets::renderHistoryTooltip(ageSeconds, rows);
 }
 
 // Network interface utilities (isVirtualInterface, isBluetoothInterface, getSortedFilteredInterfaces)
@@ -650,14 +660,14 @@ void SystemMetricsPanel::renderOverview()
                     yIowaitTop[i] = ySystemTop[i] + static_cast<double>(cpuIowaitData[i]);
                 }
 
-                ImPlot::PlotShaded("User",
+                ImPlot::PlotShaded(CPU_USER_LABEL,
                                    breakdownTimeData.data(),
                                    y0.data(),
                                    yUserTop.data(),
                                    UI::Format::checkedCount(breakdownCount),
                                    {ImPlotProp_FillColor, theme.scheme().cpuUserFill});
 
-                ImPlot::PlotShaded("System",
+                ImPlot::PlotShaded(CPU_SYSTEM_LABEL,
                                    breakdownTimeData.data(),
                                    yUserTop.data(),
                                    ySystemTop.data(),
@@ -666,7 +676,7 @@ void SystemMetricsPanel::renderOverview()
 
                 if (showIowait)
                 {
-                    ImPlot::PlotShaded("I/O Wait",
+                    ImPlot::PlotShaded(CPU_IOWAIT_LABEL,
                                        breakdownTimeData.data(),
                                        ySystemTop.data(),
                                        yIowaitTop.data(),
@@ -679,7 +689,7 @@ void SystemMetricsPanel::renderOverview()
                 // of the stack understated the load whenever that other time was significant.
                 if (!cpuData.empty())
                 {
-                    plotLineWithFill("Total",
+                    plotLineWithFill(CPU_TOTAL_LABEL,
                                      cpuTimeData.data(),
                                      cpuData.data(),
                                      UI::Format::checkedCount(cpuData.size()),
@@ -708,7 +718,7 @@ void SystemMetricsPanel::renderOverview()
             }
             else if (!cpuData.empty())
             {
-                plotLineWithFill("CPU",
+                plotLineWithFill(CPU_SINGLE_LABEL,
                                  cpuTimeData.data(),
                                  cpuData.data(),
                                  UI::Format::checkedCount(cpuData.size()),
@@ -720,12 +730,10 @@ void SystemMetricsPanel::renderOverview()
                     const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
                     if (const auto idxVal = hoveredIndexFromPlotX(cpuTimeData, mouse.x))
                     {
-                        ImGui::BeginTooltip();
-                        const auto ageText = formatAgeSeconds(static_cast<double>(cpuTimeData[*idxVal]));
-                        ImGui::TextUnformatted(ageText.c_str());
-                        ImGui::Separator();
-                        ImGui::Text("CPU: %s", UI::Format::percentCompact(cpuData[*idxVal]).c_str());
-                        ImGui::EndTooltip();
+                        const std::array rows{UI::Widgets::TooltipRow{.label = CPU_SINGLE_LABEL,
+                                                                      .color = theme.scheme().chartCpu,
+                                                                      .value = UI::Format::percentCompact(cpuData[*idxVal])}};
+                        UI::Widgets::renderHistoryTooltip(cpuTimeData[*idxVal], rows);
                     }
                 }
             }
@@ -738,17 +746,17 @@ void SystemMetricsPanel::renderOverview()
 
     std::vector<NowBar> cpuBars;
     cpuBars.push_back({.valueText = UI::Format::percentCompact(m_SmoothedCpu.total),
-                       .label = "CPU Total",
+                       .label = CPU_TOTAL_LABEL,
                        .tooltipText = {},
                        .value01 = UI::Format::percent01(m_SmoothedCpu.total),
                        .color = theme.progressColor(m_SmoothedCpu.total)});
     cpuBars.push_back({.valueText = UI::Format::percentCompact(m_SmoothedCpu.user),
-                       .label = "User",
+                       .label = CPU_USER_LABEL,
                        .tooltipText = {},
                        .value01 = UI::Format::percent01(m_SmoothedCpu.user),
                        .color = theme.scheme().cpuUser});
     cpuBars.push_back({.valueText = UI::Format::percentCompact(m_SmoothedCpu.system),
-                       .label = "System",
+                       .label = CPU_SYSTEM_LABEL,
                        .tooltipText = {},
                        .value01 = UI::Format::percent01(m_SmoothedCpu.system),
                        .color = theme.scheme().cpuSystem});
@@ -756,7 +764,7 @@ void SystemMetricsPanel::renderOverview()
     {
         cpuBars.push_back({
             .valueText = UI::Format::percentCompact(m_SmoothedCpu.iowait),
-            .label = "I/O Wait",
+            .label = CPU_IOWAIT_LABEL,
             .tooltipText = {},
             .value01 = UI::Format::percent01(m_SmoothedCpu.iowait),
             .color = theme.scheme().cpuIowait,
@@ -854,7 +862,7 @@ void SystemMetricsPanel::renderOverview()
                 bars.push_back({
                     .valueText = powerHist.empty() ? UI::Format::formatPowerCompact(m_SmoothedPower.watts)
                                                    : UI::Format::formatPowerOrZero(m_SmoothedPower.watts),
-                    .label = "Power Draw",
+                    .label = POWER_LABEL,
                     .tooltipText = {},
                     .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedPower.watts, powerAxisUpper),
                     .color = theme.scheme().chartCpu,
@@ -864,7 +872,7 @@ void SystemMetricsPanel::renderOverview()
             if (snap.power.hasBattery)
             {
                 bars.push_back({.valueText = UI::Format::percentCompact(m_SmoothedPower.batteryChargePercent),
-                                .label = "Battery Charge",
+                                .label = BATTERY_LABEL,
                                 .tooltipText = {},
                                 .value01 = UI::Format::percent01(m_SmoothedPower.batteryChargePercent),
                                 .color = theme.scheme().chartMemory});
@@ -895,7 +903,7 @@ void SystemMetricsPanel::renderOverview()
                     // Plot power on primary Y-axis
                     if (!powerHist.empty())
                     {
-                        plotLineWithFill("Power",
+                        plotLineWithFill(POWER_LABEL,
                                          powerTimeData.data(),
                                          powerHist.data(),
                                          UI::Format::checkedCount(powerHist.size()),
@@ -910,7 +918,7 @@ void SystemMetricsPanel::renderOverview()
                     if (snap.power.hasBattery && !batteryHist.empty())
                     {
                         ImPlot::SetAxes(ImAxis_X1, hasProcessPower ? ImAxis_Y2 : ImAxis_Y1);
-                        plotLineWithFill("Battery",
+                        plotLineWithFill(BATTERY_LABEL,
                                          batteryTimeData.data(),
                                          batteryHist.data(),
                                          UI::Format::checkedCount(batteryHist.size()),
@@ -933,32 +941,22 @@ void SystemMetricsPanel::renderOverview()
                             snap.power.hasBattery ? hoveredIndexFromPlotX(batteryTimeData, mouse.x) : std::optional<size_t>{};
                         if (powerIdx || batteryIdx)
                         {
-                            ImGui::BeginTooltip();
-                            const double ageX = powerIdx ? powerTimeData[*powerIdx] : batteryTimeData[*batteryIdx];
-                            const auto ageText = formatAgeSeconds(static_cast<double>(ageX));
-                            ImGui::TextUnformatted(ageText.c_str());
-                            ImGui::Separator();
-
+                            std::vector<UI::Widgets::TooltipRow> rows;
                             if (powerIdx)
                             {
-                                const double powerVal = Domain::Numeric::toDouble(powerHist[*powerIdx]);
-                                ImGui::TextColored(theme.scheme().chartCpu, "Power: %s", UI::Format::formatPowerOrZero(powerVal).c_str());
+                                rows.push_back({.label = POWER_LABEL,
+                                                .color = theme.scheme().chartCpu,
+                                                .value = UI::Format::formatPowerOrZero(Domain::Numeric::toDouble(powerHist[*powerIdx]))});
                             }
                             if (batteryIdx)
                             {
-                                const float batteryVal = batteryHist[*batteryIdx];
-                                if (std::isnan(batteryVal))
-                                {
-                                    ImGui::TextColored(theme.scheme().chartMemory, "Battery: N/A");
-                                }
-                                else
-                                {
-                                    ImGui::TextColored(theme.scheme().chartMemory,
-                                                       "Battery: %s",
-                                                       UI::Format::percentCompact(Domain::Numeric::toDouble(batteryVal)).c_str());
-                                }
+                                const double batteryVal = Domain::Numeric::toDouble(batteryHist[*batteryIdx]);
+                                rows.push_back({.label = BATTERY_LABEL,
+                                                .color = theme.scheme().chartMemory,
+                                                .value = UI::Widgets::formatSampleOrNA(
+                                                    batteryVal, [](double v) { return UI::Format::percentCompact(v); })});
                             }
-                            ImGui::EndTooltip();
+                            UI::Widgets::renderHistoryTooltip(powerIdx ? powerTimeData[*powerIdx] : batteryTimeData[*batteryIdx], rows);
                         }
                     }
                 }
@@ -1135,13 +1133,13 @@ void SystemMetricsPanel::renderOverview()
 #endif
 
         const NowBar threadsBar{.valueText = UI::Format::formatCountWithLabel(std::llround(m_SmoothedResources.threads), "threads"),
-                                .label = "Threads",
-                                .tooltipText =
-                                    std::format("Threads: {}", UI::Format::formatIntLocalized(std::llround(m_SmoothedResources.threads))),
+                                .label = THREADS_LABEL,
+                                .tooltipText = UI::Widgets::formatTooltipRow(
+                                    THREADS_LABEL, UI::Format::formatIntLocalized(std::llround(m_SmoothedResources.threads))),
                                 .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedResources.threads, countAxisUpper),
                                 .color = theme.scheme().chartCpu};
         const NowBar faultsBar{.valueText = UI::Format::formatCountPerSecond(m_SmoothedResources.pageFaults),
-                               .label = "Page Faults",
+                               .label = FAULTS_LABEL,
                                .tooltipText = {},
                                .value01 = UI::Widgets::normalizeToUnitInterval(m_SmoothedResources.pageFaults, faultAxisUpper),
                                .color = theme.accentColor(3)};
@@ -1161,7 +1159,7 @@ void SystemMetricsPanel::renderOverview()
             {
                 chart.setupSecondaryRateAxis(faultAxisUpper, formatAxisLocalized);
                 const int count = UI::Format::checkedCount(alignedCount);
-                plotLineWithFill("Threads",
+                plotLineWithFill(THREADS_LABEL,
                                  timeData.data(),
                                  threadData.data(),
                                  count,
@@ -1171,7 +1169,7 @@ void SystemMetricsPanel::renderOverview()
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
                 ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
-                plotLineWithFill("Page Faults/s",
+                plotLineWithFill(FAULTS_LABEL,
                                  timeData.data(),
                                  faultData.data(),
                                  count,
@@ -1198,21 +1196,18 @@ void SystemMetricsPanel::renderOverview()
                     {
                         if (*idxVal < alignedCount)
                         {
-                            ImGui::BeginTooltip();
-                            const auto ageText = formatAgeSeconds(static_cast<double>(timeData[*idxVal]));
-                            ImGui::TextUnformatted(ageText.c_str());
-                            ImGui::Separator();
-                            ImGui::TextColored(theme.scheme().chartCpu,
-                                               "Threads: %s",
-                                               UI::Format::formatIntLocalized(std::llround(threadData[*idxVal])).c_str());
-                            ImGui::TextColored(theme.accentColor(3),
-                                               "Page Faults: %s",
-                                               UI::Format::formatCountPerSecond(static_cast<double>(faultData[*idxVal])).c_str());
-                            ImGui::TextColored(theme.scheme().chartMemory,
-                                               "%s: %s",
-                                               handleLabel,
-                                               UI::Format::formatIntLocalized(std::llround(handleData[*idxVal])).c_str());
-                            ImGui::EndTooltip();
+                            const std::array rows{
+                                UI::Widgets::TooltipRow{.label = THREADS_LABEL,
+                                                        .color = theme.scheme().chartCpu,
+                                                        .value = UI::Format::formatIntLocalized(std::llround(threadData[*idxVal]))},
+                                UI::Widgets::TooltipRow{.label = FAULTS_LABEL,
+                                                        .color = theme.accentColor(3),
+                                                        .value = UI::Format::formatCountPerSecond(static_cast<double>(faultData[*idxVal]))},
+                                UI::Widgets::TooltipRow{.label = handleLabel,
+                                                        .color = theme.scheme().chartMemory,
+                                                        .value = UI::Format::formatIntLocalized(std::llround(handleData[*idxVal]))},
+                            };
+                            UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);
                         }
                     }
                 }
