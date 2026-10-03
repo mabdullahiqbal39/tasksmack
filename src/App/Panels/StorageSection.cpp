@@ -76,7 +76,7 @@ constexpr float MIN_DISK_CELL_WIDTH_EM = 30.0F;
 /// single-line label row, so the resulting vertical overhead is the same across all disks and
 /// doesn't change frame to frame on its own.
 void renderDiskCell(const std::string& deviceName,
-                    const std::vector<float>& timeData,
+                    const std::vector<double>& timeData,
                     const std::vector<float>& readData,
                     const std::vector<float>& writeData,
                     double currentRead,
@@ -219,7 +219,7 @@ void updateSmoothedDiskIO(double targetRead, double targetWrite, float deltaTime
 void renderStorageSection(RenderContext& ctx)
 {
     const auto& theme = UI::Theme::get();
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
 
     if (ctx.publication == nullptr)
     {
@@ -235,7 +235,7 @@ void renderStorageSection(RenderContext& ctx)
                                           : makeTimeAxisConfig({}, ctx.maxHistorySeconds, ctx.historyScrollSeconds);
 
     // Build shared time axis (float, relative)
-    std::vector<float> diskTimes;
+    std::vector<double> diskTimes;
     if (historySize > 0)
     {
         diskTimes = buildTimeAxis(diskTimestamps, historySize, nowSeconds);
@@ -359,7 +359,7 @@ void renderStorageSection(RenderContext& ctx)
                     diskWrite = it->second->writeBytesPerSec;
                 }
 
-                const std::vector<float> cellTimes(diskTimes.end() - static_cast<std::ptrdiff_t>(alignedCount), diskTimes.end());
+                const std::vector<double> cellTimes(diskTimes.end() - static_cast<std::ptrdiff_t>(alignedCount), diskTimes.end());
                 renderDiskCell(
                     disk.deviceName, cellTimes, readData, writeData, diskRead, diskWrite, diskAxis, theme, cellHeight, cachedOverhead);
             },

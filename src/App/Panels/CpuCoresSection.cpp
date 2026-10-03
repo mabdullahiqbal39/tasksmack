@@ -102,7 +102,7 @@ void renderCpuCoresSection(RenderContext& ctx)
 
     // Get timestamps from cache or model
     const auto& timestamps = ctx.publication->timestamps;
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
     const auto axisConfig = makeTimeAxisConfig(timestamps, ctx.maxHistorySeconds, ctx.historyScrollSeconds);
 
     if (perCoreHist.empty() || timestamps.empty())
@@ -213,7 +213,7 @@ void renderCpuCoresSection(RenderContext& ctx)
                             }
                             const float measuredOverhead = *cachedOverhead;
 
-                            std::vector<float> timeData = buildTimeAxis(timestamps, samples.size(), nowSeconds);
+                            std::vector<double> timeData = buildTimeAxis(timestamps, samples.size(), nowSeconds);
                             const float plotHeight = std::max(minCorePlotHeight(), cellHeight - measuredOverhead);
 
                             // timeData holds the newest min(samples, timestamps) entries; take the same

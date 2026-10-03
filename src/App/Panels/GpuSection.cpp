@@ -122,7 +122,7 @@ void renderGpuSection(RenderContext& ctx)
     const auto& caps = ctx.publication->capabilities;
     auto& theme = UI::Theme::get();
 
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
 
     ImGui::Text("GPU Monitoring (%zu GPU%s)", gpuSnapshots.size(), gpuSnapshots.size() == 1 ? "" : "s");
     ImGui::Spacing();
@@ -224,7 +224,7 @@ void renderGpuSection(RenderContext& ctx)
         const auto memUsedBytesData = tailAlignedSpan(history.memoryUsedBytes, alignedCount).values;
         const auto memTotalBytesData = tailAlignedSpan(history.memoryTotalBytes, alignedCount).values;
 
-        std::vector<float> timeData = buildTimeAxis(perGpuTimestamps, alignedCount, nowSeconds);
+        std::vector<double> timeData = buildTimeAxis(perGpuTimestamps, alignedCount, nowSeconds);
 
         // Compute per-GPU axis config from per-GPU timestamps so that X-axis scroll/limits
         // stay consistent with the data being plotted even when a GPU is intermittently absent

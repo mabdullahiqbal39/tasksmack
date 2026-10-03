@@ -2,10 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -239,6 +241,252 @@ TEST(ChartWidgetsReduceTest, ReductionKeepsALeadingGap)
 
     EXPECT_TRUE(std::isnan(outY[0]));
     EXPECT_FLOAT_EQ(outY[1], 1.0F);
+}
+
+// ========== reduceSeriesMinMax (#1010) ==========
+
+TEST(ChartWidgetsReduceTest, BucketWidthIsAPowerOfTwoThatHoldsAsTheSpanDrifts)
+{
+    // 300 s into 239 buckets: 1.255 s rounds up to 2 s, and stays 2 s as the span drifts.
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(300.0, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(299.9, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(300.1, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(30.0, 239), 0.25); // 0.1255 rounds up to 2^-2
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(0.0, 239), 0.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(std::numeric_limits<double>::quiet_NaN(), 239), 0.0);
+}
+
+namespace
+{
+// 100 ms samples over 300 s, as "seconds before now" (the last sample at x = 0).
+struct ReduceFixture
+{
+    static constexpr int COUNT = 3000;
+    std::vector<double> x = std::vector<double>(COUNT);
+    std::vector<double> y = std::vector<double>(COUNT, 10.0);
+    ReduceFixture()
+    {
+        for (int i = 0; i < COUNT; ++i)
+        {
+            x[static_cast<std::size_t>(i)] = (static_cast<double>(i) - (COUNT - 1)) * 0.1;
+        }
+    }
+};
+} // namespace
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionKeepsASingleSamplePeak)
+{
+    ReduceFixture f;
+    f.y[1234] = 99.0; // one sample; a stride of ~4 would usually skip it
+    std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+    const int written =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 1000.0, outX.data(), outY.data());
+    ASSERT_GT(written, 0);
+    ASSERT_LE(written, LINE_PLOT_MAX_POINTS_DENSE);
+    const auto peak = std::ranges::max(std::span(outY).first(static_cast<std::size_t>(written)));
+    EXPECT_DOUBLE_EQ(peak, 99.0);
+    // The newest sample is never dropped.
+    EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], 0.0);
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionIsStableAsTheWindowScrolls)
+{
+    // Every frame, x shifts left by the time elapsed and the anchor (now) moves right by the same
+    // amount, so each sample's absolute time -- and therefore its bucket -- is unchanged.
+    ReduceFixture f;
+    for (int i = 0; i < ReduceFixture::COUNT; ++i)
+    {
+        f.y[static_cast<std::size_t>(i)] = static_cast<double>((i * 37) % 101); // jagged
+    }
+    std::vector<double> firstX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> firstY(LINE_PLOT_MAX_POINTS_DENSE);
+    const double now = 5000.03;
+    const int firstCount =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now, firstX.data(), firstY.data());
+
+    for (const double elapsed : {0.016, 0.033, 0.05, 0.083})
+    {
+        std::vector<double> shifted(f.x);
+        for (auto& v : shifted)
+        {
+            v -= elapsed;
+        }
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int count = reduceSeriesMinMax(
+            shifted.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now + elapsed, outX.data(), outY.data());
+        ASSERT_EQ(count, firstCount) << "elapsed " << elapsed;
+        for (int k = 0; k < count; ++k)
+        {
+            EXPECT_DOUBLE_EQ(outY[static_cast<std::size_t>(k)], firstY[static_cast<std::size_t>(k)]) << "point " << k;
+        }
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionKeepsAGap)
+{
+    ReduceFixture f;
+    f.y[1500] = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+    const int written =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 0.0, outX.data(), outY.data());
+    int gaps = 0;
+    for (int k = 0; k < written; ++k)
+    {
+        gaps += std::isnan(outY[static_cast<std::size_t>(k)]) ? 1 : 0;
+    }
+    EXPECT_EQ(gaps, 1);
+    // Points stay in x order, so the line runs left to right through the gap.
+    for (int k = 1; k < written; ++k)
+    {
+        EXPECT_LT(outX[static_cast<std::size_t>(k) - 1], outX[static_cast<std::size_t>(k)]);
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionAlwaysEndsAtTheNewestAndStartsAtTheOldestSample)
+{
+    // A flat series: every bucket's min and max are its first sample, so without the end samples
+    // the line would stop up to a bucket width short of x = 0 and start late on the left.
+    for (const double now : {1000.0, 1000.37, 1000.81}) // endpoints at different places in their buckets
+    {
+        ReduceFixture f;
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now, outX.data(), outY.data());
+        ASSERT_GT(written, 1);
+        ASSERT_LE(written, LINE_PLOT_MAX_POINTS_DENSE);
+        EXPECT_DOUBLE_EQ(outX.front(), f.x.front()) << "now " << now;
+        EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], f.x.back()) << "now " << now;
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionNeverExceedsItsBudget)
+{
+    // Worst case: every bucket has a distinct min, max and gap.
+    ReduceFixture f;
+    for (int i = 0; i < ReduceFixture::COUNT; ++i)
+    {
+        f.y[static_cast<std::size_t>(i)] = (i % 7 == 3) ? std::numeric_limits<double>::quiet_NaN() : static_cast<double>((i * 13) % 17);
+    }
+    for (const int budget : {30, 31, 32, 100, LINE_PLOT_MAX_POINTS_DENSE})
+    {
+        std::vector<double> outX(static_cast<std::size_t>(budget));
+        std::vector<double> outY(static_cast<std::size_t>(budget));
+        const int written = reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, budget, 7.3, outX.data(), outY.data());
+        EXPECT_LE(written, budget);
+        EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], f.x.back()) << "budget " << budget;
+    }
+}
+
+namespace
+{
+// Asserts that no two consecutive finite output points have a NaN source sample between them --
+// which is what drawing the line across a gap would mean.
+void expectNoBridgedGap(const ReduceFixture& f, const std::vector<double>& outX, const std::vector<double>& outY, int written)
+{
+    const auto sourceIndexOf = [&](double x)
+    {
+        return static_cast<int>(std::lround((x / 0.1) + (ReduceFixture::COUNT - 1)));
+    };
+    for (int k = 1; k < written; ++k)
+    {
+        const auto a = static_cast<std::size_t>(k - 1);
+        const auto b = static_cast<std::size_t>(k);
+        if (std::isnan(outY[a]) || std::isnan(outY[b]))
+        {
+            continue;
+        }
+        for (int src = sourceIndexOf(outX[a]) + 1; src < sourceIndexOf(outX[b]); ++src)
+        {
+            EXPECT_FALSE(std::isnan(f.y[static_cast<std::size_t>(src)])) << "points " << k - 1 << "-" << k << " bridge the gap at " << src;
+        }
+    }
+}
+} // namespace
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionNeverBridgesAGapWhateverItsLayoutInOneBucket)
+{
+    // With now = 0.05 and 100 ms samples, the 2 s buckets hold 20 samples each; 1499..1518 is one
+    // bucket. Each layout puts the bucket's min and max between gaps, the case that used to bridge.
+    struct Layout
+    {
+        std::vector<int> gaps;
+        int maxAt;
+        int minAt;
+    };
+    const std::vector<Layout> layouts{
+        {.gaps = {1504}, .maxAt = 1500, .minAt = 1510},             // one run, extremes either side
+        {.gaps = {1504, 1512}, .maxAt = 1508, .minAt = 1516},       // two runs
+        {.gaps = {1504, 1508, 1512}, .maxAt = 1506, .minAt = 1510}, // three runs (#1051 review)
+        {.gaps = {1502, 1503, 1509, 1515}, .maxAt = 1506, .minAt = 1512},
+    };
+    for (const auto& layout : layouts)
+    {
+        ReduceFixture f;
+        for (const int i : layout.gaps)
+        {
+            f.y[static_cast<std::size_t>(i)] = std::numeric_limits<double>::quiet_NaN();
+        }
+        f.y[static_cast<std::size_t>(layout.maxAt)] = 50.0;
+        f.y[static_cast<std::size_t>(layout.minAt)] = 0.5;
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 0.05, outX.data(), outY.data());
+        SCOPED_TRACE(layout.gaps.size());
+        expectNoBridgedGap(f, outX, outY, written);
+    }
+}
+
+TEST(ChartWidgetsReduceTest, ReductionOfABuiltTimeAxisIsStableAsNowAdvances)
+{
+    // The production path: buildTimeAxis(timestamps, n, now) then a reduction anchored at the same
+    // now. With a float axis, x + now did not recover the timestamp exactly and the error changed as
+    // now advanced, so a sample this close to a bucket boundary could change bucket between frames
+    // (#1051 review). Timestamps are large, like steady_clock seconds on a long-running machine.
+    constexpr std::size_t COUNT = 3000;
+    std::vector<double> timestamps(COUNT);
+    std::vector<double> values(COUNT);
+    const double start = 864'000.0; // ten days of uptime
+    for (std::size_t i = 0; i < COUNT; ++i)
+    {
+        timestamps[i] = start + (static_cast<double>(i) * 0.1);
+        values[i] = static_cast<double>((i * 37) % 101);
+    }
+    // One sample 2 microseconds before a 2 s bucket boundary, with a value that makes it a bucket max.
+    timestamps[1500] = 864'150.0 - 2e-6;
+    values[1500] = 500.0;
+
+    std::vector<double> firstY;
+    for (const double elapsed : {0.0, 0.0161, 0.0334, 0.0517, 0.0833, 0.1})
+    {
+        const double now = timestamps.back() + 0.04 + elapsed;
+        const auto x = buildTimeAxis(timestamps, COUNT, now);
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(x.data(), values.data(), static_cast<int>(COUNT), LINE_PLOT_MAX_POINTS_DENSE, now, outX.data(), outY.data());
+        outY.resize(static_cast<std::size_t>(written));
+        if (firstY.empty())
+        {
+            firstY = outY;
+            continue;
+        }
+        EXPECT_EQ(outY, firstY) << "elapsed " << elapsed;
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionFallsBackForAnUnusableSpan)
+{
+    // x not increasing (all equal): no usable bucket width, so it falls back to the stride.
+    std::vector<float> x(10, 0.0F);
+    std::vector<float> y(10, 1.0F);
+    std::vector<float> outX(4);
+    std::vector<float> outY(4);
+    EXPECT_EQ(reduceSeriesMinMax(x.data(), y.data(), 10, 4, 0.0, outX.data(), outY.data()), 4);
 }
 
 // ========== Axis formatters ==========
