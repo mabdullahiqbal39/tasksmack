@@ -173,15 +173,51 @@ inline std::string formatAgeSeconds(double relativeSeconds)
 /// Compute dynamic max for NowBar and Y-axis scaling.
 /// Returns max of all values in history plus current, with a minimum floor of 1.0.
 /// Used to keep NowBar height consistent with chart Y-axis.
+///
+/// Non-finite values are ignored. NaN marks a sample with no reading, and std::max_element compares
+/// it false against everything, so where a NaN sat decided whether the result was NaN -- and a NaN
+/// maximum made every bar normalised by it read 0 (#999).
 [[nodiscard]] inline double seriesMax(const std::vector<double>& values, double current)
 {
-    if (values.empty())
+    double best = 1.0;
+    for (const double v : values)
     {
-        return std::max(current, 1.0);
+        if (std::isfinite(v) && v > best)
+        {
+            best = v;
+        }
     }
-    const auto it = std::ranges::max_element(values);
-    const double historyMax = (it != values.end()) ? *it : 1.0;
-    return std::max({historyMax, current, 1.0});
+    if (std::isfinite(current) && current > best)
+    {
+        best = current;
+    }
+    return best;
+}
+
+/// Calls `onRun(start, length)` for each maximal run of finite values in `values[0, count)`.
+///
+/// NaN marks a sample with no reading. Splitting a series into its finite runs is how a gap is drawn
+/// as a gap by renderers that do not handle NaN themselves (ImPlot's shaded renderer, #989).
+template<typename T, typename OnRun> inline void forEachFiniteRun(const T* values, int count, OnRun&& onRun)
+{
+    int runStart = 0;
+    while (runStart < count)
+    {
+        while (runStart < count && !std::isfinite(static_cast<double>(values[runStart])))
+        {
+            ++runStart;
+        }
+        int runEnd = runStart;
+        while (runEnd < count && std::isfinite(static_cast<double>(values[runEnd])))
+        {
+            ++runEnd;
+        }
+        if (runEnd > runStart)
+        {
+            onRun(runStart, runEnd - runStart);
+        }
+        runStart = runEnd;
+    }
 }
 
 template<typename TX, typename TY>
@@ -208,7 +244,16 @@ inline void plotLineWithFill(const char* label,
             // Render fill with same label as line so ImPlot treats them as one series.
             // When user clicks legend to hide the series, both fill and line hide together.
             // Render fill first so line appears on top.
-            ImPlot::PlotShaded(label, plotXData, plotYData, plotCount, 0.0, {ImPlotProp_FillColor, fill});
+            //
+            // A NaN sample means "no reading" and must be a gap. ImPlot's line renderer breaks at
+            // NaN by itself, but its shaded renderer has no NaN handling at all, so the fill is drawn
+            // run by run over the finite samples only. Each run uses the same label, so the legend
+            // still shows one item.
+            forEachFiniteRun(
+                plotYData,
+                plotCount,
+                [&](int runStart, int runLength)
+                { ImPlot::PlotShaded(label, plotXData + runStart, plotYData + runStart, runLength, 0.0, {ImPlotProp_FillColor, fill}); });
         }
 
         ImPlot::PlotLine(label, plotXData, plotYData, plotCount, {ImPlotProp_LineColor, lineColor, ImPlotProp_LineWeight, lineThickness});

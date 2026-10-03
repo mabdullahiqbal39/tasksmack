@@ -40,6 +40,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <string>
 #include <utility>
 #include <vector>
@@ -91,27 +92,24 @@ using UI::Widgets::makeTimeAxisConfig;
 using UI::Widgets::NowBar;
 using UI::Widgets::renderHistoryWithNowBars;
 
-[[nodiscard]] int checkedRoundSeconds(double seconds)
-{
-    const long rounded = std::lround(seconds);
-    return Domain::Numeric::narrowOr<int>(rounded, std::numeric_limits<int>::max());
-}
-
+/// Hover tooltip for the system CPU chart: the age of the hovered sample to a tenth of a second, as
+/// every other chart shows it, then Total and each band of the stack.
+///
+/// Total is 100 - idle, so it includes irq, softirq and steal time that the User/System/I/O Wait
+/// bands do not; showing it is what makes the tooltip agree with the Total line and the Total bar.
 void showCpuBreakdownTooltip(const UI::ColorScheme& scheme,
-                             bool showTime,
-                             int timeSec,
+                             double ageSeconds,
+                             float totalPercent,
                              float userPercent,
                              float systemPercent,
                              float iowaitPercent,
                              float idlePercent)
 {
     ImGui::BeginTooltip();
-    if (showTime)
-    {
-        const auto ageText = formatAgeSeconds(static_cast<double>(timeSec));
-        ImGui::TextUnformatted(ageText.c_str());
-        ImGui::Separator();
-    }
+    const auto ageText = formatAgeSeconds(ageSeconds);
+    ImGui::TextUnformatted(ageText.c_str());
+    ImGui::Separator();
+    ImGui::TextColored(scheme.chartCpu, "Total: %s", UI::Format::percentCompact(totalPercent).c_str());
     ImGui::TextColored(scheme.cpuUser, "User: %s", UI::Format::percentCompact(userPercent).c_str());
     ImGui::TextColored(scheme.cpuSystem, "System: %s", UI::Format::percentCompact(systemPercent).c_str());
     ImGui::TextColored(scheme.cpuIowait, "I/O Wait: %s", UI::Format::percentCompact(iowaitPercent).c_str());
@@ -659,14 +657,28 @@ void SystemMetricsPanel::renderOverview()
                                    UI::Format::checkedCount(breakdownCount),
                                    {ImPlotProp_FillColor, theme.scheme().cpuIowaitFill});
 
+                // Total over the stack. It is 100 - idle, so it includes irq, softirq and steal time
+                // the three bands do not: without it the "CPU Total" bar had no series, and the top
+                // of the stack understated the load whenever that other time was significant.
+                if (!cpuData.empty())
+                {
+                    ImPlot::PlotLine("Total",
+                                     cpuTimeData.data(),
+                                     cpuData.data(),
+                                     UI::Format::checkedCount(cpuData.size()),
+                                     {ImPlotProp_LineColor, theme.scheme().chartCpu, ImPlotProp_LineWeight, 2.0F});
+                }
+
                 if (ImPlot::IsPlotHovered())
                 {
                     const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
                     if (const auto si = hoveredIndexFromPlotX(breakdownTimeData, mouse.x))
                     {
+                        // Total comes from its own series, looked up at the same moment.
+                        const auto totalIdx = hoveredIndexFromPlotX(cpuTimeData, mouse.x);
                         showCpuBreakdownTooltip(theme.scheme(),
-                                                true,
-                                                checkedRoundSeconds(static_cast<double>(breakdownTimeData[*si])),
+                                                static_cast<double>(breakdownTimeData[*si]),
+                                                totalIdx ? cpuData[*totalIdx] : (100.0F - cpuIdleData[*si]),
                                                 cpuUserData[*si],
                                                 cpuSystemData[*si],
                                                 cpuIowaitData[*si],
@@ -761,10 +773,13 @@ void SystemMetricsPanel::renderOverview()
         // Get battery charge history from SystemModel
         const auto& batteryHistFloat = m_SystemPublication->batteryChargeHistory;
 
-        // Align to timestamps - use process timestamps as primary if available, else system timestamps
-        const auto& alignTimestamps = !m_ProcessHistoryTimestamps.empty() ? m_ProcessHistoryTimestamps : timestamps;
-        const size_t powerCount = std::min(m_ProcessPowerHistory.size(), alignTimestamps.size());
-        const size_t batteryCount = std::min(batteryHistFloat.size(), alignTimestamps.size());
+        // Each series against the timestamps of the sampler that produced it. Power is aggregated
+        // by ProcessModel and battery charge is read by SystemModel; the two run on their own
+        // intervals and phases, so drawing battery against the process timestamps (as this once
+        // did) put every battery sample at the wrong time and paired mismatched samples in the
+        // tooltip.
+        const size_t powerCount = std::min(m_ProcessPowerHistory.size(), m_ProcessHistoryTimestamps.size());
+        const size_t batteryCount = std::min(batteryHistFloat.size(), timestamps.size());
         const size_t alignedCount = std::max(powerCount, batteryCount);
 
         if (alignedCount > 0)
@@ -781,7 +796,8 @@ void SystemMetricsPanel::renderOverview()
                 }
             }
 
-            // Extract aligned battery history (filter out -1 = no data)
+            // Battery history, with the model's "no reading" value (-1) as NaN: a gap in the line,
+            // not a dive to 0 %.
             std::vector<float> batteryHist;
             if (batteryCount > 0)
             {
@@ -789,17 +805,18 @@ void SystemMetricsPanel::renderOverview()
                 const auto startIt = batteryHistFloat.end() - static_cast<std::ptrdiff_t>(batteryCount);
                 for (auto it = startIt; it != batteryHistFloat.end(); ++it)
                 {
-                    batteryHist.push_back(*it >= 0.0F ? *it : 0.0F);
+                    batteryHist.push_back(*it >= 0.0F ? *it : std::numeric_limits<float>::quiet_NaN());
                 }
             }
 
-            std::vector<float> timeData = buildTimeAxis(alignTimestamps, alignedCount, nowSeconds);
-            const auto axis = makeTimeAxisConfig(alignTimestamps, m_MaxHistorySeconds, m_HistoryScrollSeconds);
-            const size_t powerOffset = alignedCount - powerHist.size();
-            const size_t batteryOffset = alignedCount - batteryHist.size();
-            // Update smoothed values
+            const std::vector<float> powerTimeData = buildTimeAxis(m_ProcessHistoryTimestamps, powerCount, nowSeconds);
+            const std::vector<float> batteryTimeData = buildTimeAxis(timestamps, batteryCount, nowSeconds);
+            const auto axis = makeTimeAxisConfig(timestamps, m_MaxHistorySeconds, m_HistoryScrollSeconds);
+            // Update smoothed values: the latest *reading*, skipping trailing gaps.
             const float targetPower = powerHist.empty() ? 0.0F : powerHist.back();
-            const float targetBattery = batteryHist.empty() ? 0.0F : batteryHist.back();
+            const auto finiteBattery = batteryHist | std::views::reverse;
+            const auto lastBattery = std::ranges::find_if(finiteBattery, [](float v) { return !std::isnan(v); });
+            const float targetBattery = (lastBattery != finiteBattery.end()) ? *lastBattery : 0.0F;
             updateSmoothedPower(targetPower, targetBattery, m_LastDeltaSeconds);
 
             // Compute max for power scale
@@ -856,7 +873,7 @@ void SystemMetricsPanel::renderOverview()
                     if (!powerHist.empty())
                     {
                         plotLineWithFill("Power",
-                                         timeData.data() + static_cast<std::ptrdiff_t>(powerOffset),
+                                         powerTimeData.data(),
                                          powerHist.data(),
                                          UI::Format::checkedCount(powerHist.size()),
                                          theme.scheme().chartCpu,
@@ -871,7 +888,7 @@ void SystemMetricsPanel::renderOverview()
                     {
                         ImPlot::SetAxes(ImAxis_X1, ImAxis_Y2);
                         plotLineWithFill("Battery",
-                                         timeData.data() + static_cast<std::ptrdiff_t>(batteryOffset),
+                                         batteryTimeData.data(),
                                          batteryHist.data(),
                                          UI::Format::checkedCount(batteryHist.size()),
                                          theme.scheme().chartMemory,
@@ -885,26 +902,38 @@ void SystemMetricsPanel::renderOverview()
                     // Tooltip
                     if (ImPlot::IsPlotHovered())
                     {
+                        // Each series has its own time axis, so each is looked up on its own: the
+                        // nearest power sample and the nearest battery sample to the pointer.
                         const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-                        if (const auto idxVal = hoveredIndexFromPlotX(timeData, mouse.x))
+                        const auto powerIdx = hoveredIndexFromPlotX(powerTimeData, mouse.x);
+                        const auto batteryIdx =
+                            snap.power.hasBattery ? hoveredIndexFromPlotX(batteryTimeData, mouse.x) : std::optional<size_t>{};
+                        if (powerIdx || batteryIdx)
                         {
                             ImGui::BeginTooltip();
-                            const auto ageText = formatAgeSeconds(static_cast<double>(timeData[*idxVal]));
+                            const float ageX = powerIdx ? powerTimeData[*powerIdx] : batteryTimeData[*batteryIdx];
+                            const auto ageText = formatAgeSeconds(static_cast<double>(ageX));
                             ImGui::TextUnformatted(ageText.c_str());
                             ImGui::Separator();
 
-                            if (*idxVal >= powerOffset)
+                            if (powerIdx)
                             {
-                                const size_t powerIdx = *idxVal - powerOffset;
-                                const double powerVal = Domain::Numeric::toDouble(powerHist[powerIdx]);
+                                const double powerVal = Domain::Numeric::toDouble(powerHist[*powerIdx]);
                                 ImGui::TextColored(theme.scheme().chartCpu, "Power: %s", UI::Format::formatPowerOrZero(powerVal).c_str());
                             }
-                            if ((*idxVal >= batteryOffset) && snap.power.hasBattery)
+                            if (batteryIdx)
                             {
-                                const size_t batteryIdx = *idxVal - batteryOffset;
-                                const double batteryVal = Domain::Numeric::toDouble(batteryHist[batteryIdx]);
-                                ImGui::TextColored(
-                                    theme.scheme().chartMemory, "Battery: %s", UI::Format::percentCompact(batteryVal).c_str());
+                                const float batteryVal = batteryHist[*batteryIdx];
+                                if (std::isnan(batteryVal))
+                                {
+                                    ImGui::TextColored(theme.scheme().chartMemory, "Battery: N/A");
+                                }
+                                else
+                                {
+                                    ImGui::TextColored(theme.scheme().chartMemory,
+                                                       "Battery: %s",
+                                                       UI::Format::percentCompact(Domain::Numeric::toDouble(batteryVal)).c_str());
+                                }
                             }
                             ImGui::EndTooltip();
                         }

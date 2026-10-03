@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace UI::Widgets
@@ -274,6 +275,65 @@ TEST(ChartWidgetsFormattersTest, FormatAxisBytesPerSecHandlesMegaAndGigaSuffixes
 }
 
 // ========== seriesMax / normalizeToUnitInterval ==========
+
+// #999: NaN marks a missing reading. Wherever it sits in the series, it must not become the
+// maximum, or every bar normalised by that maximum reads 0.
+TEST(ChartWidgetsTest, SeriesMaxIgnoresNaNWhereverItSits)
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_DOUBLE_EQ(seriesMax({nan, 2.0, 8.0}, 4.0), 8.0);
+    EXPECT_DOUBLE_EQ(seriesMax({2.0, nan, 8.0}, 4.0), 8.0);
+    EXPECT_DOUBLE_EQ(seriesMax({2.0, 8.0, nan}, 4.0), 8.0);
+    EXPECT_DOUBLE_EQ(seriesMax({nan, nan}, 4.0), 4.0);
+    EXPECT_DOUBLE_EQ(seriesMax({nan}, nan), 1.0);
+}
+
+TEST(ChartWidgetsTest, SeriesMaxIgnoresInfinity)
+{
+    const double inf = std::numeric_limits<double>::infinity();
+    EXPECT_DOUBLE_EQ(seriesMax({2.0, inf}, 3.0), 3.0);
+    EXPECT_DOUBLE_EQ(seriesMax({2.0}, inf), 2.0);
+}
+
+// ========== forEachFiniteRun (#989) ==========
+
+namespace
+{
+[[nodiscard]] std::vector<std::pair<int, int>> finiteRuns(const std::vector<float>& values)
+{
+    std::vector<std::pair<int, int>> runs;
+    UI::Widgets::forEachFiniteRun(
+        values.data(), static_cast<int>(values.size()), [&](int start, int length) { runs.emplace_back(start, length); });
+    return runs;
+}
+} // namespace
+
+TEST(ChartWidgetsTest, FiniteRunsOfAnUnbrokenSeriesIsOneRun)
+{
+    EXPECT_EQ(finiteRuns({1.0F, 2.0F, 3.0F}), (std::vector<std::pair<int, int>>{{0, 3}}));
+}
+
+// A missing reading in the middle splits the series, so the fill leaves a gap there.
+TEST(ChartWidgetsTest, FiniteRunsSplitAtNaN)
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(finiteRuns({1.0F, 2.0F, nan, 4.0F, 5.0F}), (std::vector<std::pair<int, int>>{{0, 2}, {3, 2}}));
+    EXPECT_EQ(finiteRuns({1.0F, nan, nan, 4.0F}), (std::vector<std::pair<int, int>>{{0, 1}, {3, 1}}));
+}
+
+TEST(ChartWidgetsTest, FiniteRunsSkipLeadingAndTrailingGaps)
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(finiteRuns({nan, 2.0F, 3.0F, nan}), (std::vector<std::pair<int, int>>{{1, 2}}));
+}
+
+TEST(ChartWidgetsTest, FiniteRunsOfNothingFiniteIsNoRuns)
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_TRUE(finiteRuns({}).empty());
+    EXPECT_TRUE(finiteRuns({nan, nan}).empty());
+    EXPECT_TRUE(finiteRuns({std::numeric_limits<float>::infinity()}).empty());
+}
 
 TEST(ChartWidgetsTest, SeriesMaxReturnsFloorWhenValuesEmptyAndCurrentBelowFloor)
 {

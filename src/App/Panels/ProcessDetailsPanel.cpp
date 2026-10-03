@@ -805,14 +805,17 @@ void ProcessDetailsPanel::renderCpuUsageSection(UI::Widgets::FillPlotLayout& fil
                         ySystemTop[i] = cpuUserData[i] + cpuSystemData[i];
                     }
 
-                    ImPlot::PlotShaded("##CpuUser",
+                    // The bands share their labels with the User and System lines below, so ImPlot
+                    // treats each band and its line as one legend item: hiding "User" hides both.
+                    // With separate hidden labels the band stayed on screen after its line was hidden.
+                    ImPlot::PlotShaded("User",
                                        cpuTimeData.data(),
                                        y0.data(),
                                        yUserTop.data(),
                                        plotCount,
                                        {ImPlotProp_FillColor, theme.scheme().cpuUserFill});
 
-                    ImPlot::PlotShaded("##CpuSystem",
+                    ImPlot::PlotShaded("System",
                                        cpuTimeData.data(),
                                        yUserTop.data(),
                                        ySystemTop.data(),
