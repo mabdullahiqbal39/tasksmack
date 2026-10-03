@@ -243,6 +243,37 @@ class CloseListenerLayer : public Core::Layer
     int m_CloseEventsSeen = 0;
 };
 
+/// Layer that calls Window::requestClose() on its first update, as the custom title bar's Close
+/// button does, and stops the app itself after `stopAfter` updates so a vetoed close still ends.
+class CloseRequestingLayer : public Core::Layer
+{
+  public:
+    explicit CloseRequestingLayer(int stopAfter) : Layer("CloseRequester"), m_StopAfter(stopAfter)
+    {}
+
+    void onUpdate(float /*deltaTime*/) override
+    {
+        ++m_UpdateCount;
+        if (m_UpdateCount == 1)
+        {
+            Core::Application::get().getWindow().requestClose();
+        }
+        if (m_UpdateCount >= m_StopAfter)
+        {
+            Core::Application::get().stop();
+        }
+    }
+
+    [[nodiscard]] int updateCount() const
+    {
+        return m_UpdateCount;
+    }
+
+  private:
+    int m_StopAfter;
+    int m_UpdateCount = 0;
+};
+
 /// Static vector to track layer detach order across Application destruction
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::vector<std::string> g_DetachOrder;
@@ -419,6 +450,68 @@ TEST(ApplicationTest, CloseRequestIsAcceptedUnlessALayerVetoesIt)
         EXPECT_FALSE(Core::ApplicationTestAccessor::closeRequestAccepted(app));
         EXPECT_EQ(vetoer.closeEventsSeen(), 1);
         EXPECT_EQ(observer.closeEventsSeen(), 1);
+    }
+    catch (const std::exception& e)
+    {
+        GTEST_SKIP() << "Application creation failed (SDL error): " << e.what();
+    }
+}
+
+TEST(ApplicationTest, RequestCloseRaisesWindowCloseEventAndStopsWhenAccepted)
+{
+    if (!hasDisplay())
+    {
+        GTEST_SKIP() << "No display available (headless environment)";
+    }
+
+    Core::ApplicationSpecification spec;
+    spec.Name = "RequestCloseAcceptedTest";
+
+    try
+    {
+        Core::Application app(spec);
+        const auto& observer = app.pushLayer<CloseListenerLayer>("Observer", false);
+        // The fallback stop is far off: the close request should end the loop long before it.
+        const auto& requester = app.pushLayer<CloseRequestingLayer>(100);
+
+        app.run();
+
+        // Window::requestClose() reaches layers as a WindowCloseEvent (#1077), and with no veto the
+        // loop ends on the frame after the request instead of running on to the fallback stop.
+        EXPECT_EQ(observer.closeEventsSeen(), 1);
+        EXPECT_EQ(requester.updateCount(), 1);
+        EXPECT_FALSE(app.getWindow().shouldClose());
+    }
+    catch (const std::exception& e)
+    {
+        GTEST_SKIP() << "Application creation failed (SDL error): " << e.what();
+    }
+}
+
+TEST(ApplicationTest, RequestCloseIsVetoedByAHandlingLayer)
+{
+    if (!hasDisplay())
+    {
+        GTEST_SKIP() << "No display available (headless environment)";
+    }
+
+    Core::ApplicationSpecification spec;
+    spec.Name = "RequestCloseVetoedTest";
+
+    try
+    {
+        Core::Application app(spec);
+        const auto& vetoer = app.pushLayer<CloseListenerLayer>("Vetoer", true);
+        constexpr int STOP_AFTER = 3;
+        const auto& requester = app.pushLayer<CloseRequestingLayer>(STOP_AFTER);
+
+        app.run();
+
+        // The veto keeps the loop running until the layer's own stop, and the request is cleared
+        // once raised, so it is not raised again on every later frame.
+        EXPECT_EQ(vetoer.closeEventsSeen(), 1);
+        EXPECT_EQ(requester.updateCount(), STOP_AFTER);
+        EXPECT_FALSE(app.getWindow().shouldClose());
     }
     catch (const std::exception& e)
     {
