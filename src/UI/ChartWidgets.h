@@ -4,6 +4,7 @@
 #include "UI/Format.h"
 #include "UI/RateAxis.h"
 #include "UI/RenderMetrics.h"
+#include "UI/StyleScale.h"
 #include "UI/Theme.h"
 #include "UI/Widgets.h"
 
@@ -401,6 +402,14 @@ template<typename TX, typename TY>
     return cachedNow;
 }
 
+/// A chart line weight authored at the reference configuration (Medium, 100%), scaled with the font
+/// and display like the rest of the style (#971). Every ImPlotProp_LineWeight goes through this.
+[[nodiscard]] inline float lineWeight(float authoredPx)
+{
+    return scaledLineWeight(authoredPx, Theme::get().styleScale());
+}
+
+/// @p lineThickness is authored at the reference configuration; it is scaled by lineWeight().
 template<typename TX, typename TY>
 inline void plotLineWithFill(const char* label,
                              const TX* xData,
@@ -439,7 +448,8 @@ inline void plotLineWithFill(const char* label,
                 { ImPlot::PlotShaded(label, plotXData + runStart, plotYData + runStart, runLength, 0.0, {ImPlotProp_FillColor, fill}); });
         }
 
-        ImPlot::PlotLine(label, plotXData, plotYData, plotCount, {ImPlotProp_LineColor, lineColor, ImPlotProp_LineWeight, lineThickness});
+        ImPlot::PlotLine(
+            label, plotXData, plotYData, plotCount, {ImPlotProp_LineColor, lineColor, ImPlotProp_LineWeight, lineWeight(lineThickness)});
     };
 
     // Clamp effective max so the reduction and buffer capacity stay in sync.
