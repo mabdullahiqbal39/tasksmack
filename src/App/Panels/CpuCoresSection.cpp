@@ -33,12 +33,12 @@ using UI::Widgets::ChartGridConfig;
 using UI::Widgets::computeAlpha;
 using UI::Widgets::formatAgeSeconds;
 using UI::Widgets::hoveredIndexFromPlotX;
+using UI::Widgets::initializeOrSmooth;
 using UI::Widgets::makeTimeAxisConfig;
 using UI::Widgets::NowBar;
 using UI::Widgets::plotLineWithFill;
 using UI::Widgets::renderChartGrid;
 using UI::Widgets::renderHistoryWithNowBars;
-using UI::Widgets::smoothTowards;
 using UI::Widgets::tailAlignedSpan;
 
 /// Minimum plot height a core cell will shrink to before the grid prefers scrolling over squashing
@@ -102,7 +102,7 @@ void renderCpuCoresSection(RenderContext& ctx)
 
     // Get timestamps from cache or model
     const auto& timestamps = ctx.publication->timestamps;
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
     const auto axisConfig = makeTimeAxisConfig(timestamps, ctx.maxHistorySeconds, ctx.historyScrollSeconds);
 
     if (perCoreHist.empty() || timestamps.empty())
@@ -213,7 +213,7 @@ void renderCpuCoresSection(RenderContext& ctx)
                             }
                             const float measuredOverhead = *cachedOverhead;
 
-                            std::vector<float> timeData = buildTimeAxis(timestamps, samples.size(), nowSeconds);
+                            std::vector<double> timeData = buildTimeAxis(timestamps, samples.size(), nowSeconds);
                             const float plotHeight = std::max(minCorePlotHeight(), cellHeight - measuredOverhead);
 
                             // timeData holds the newest min(samples, timestamps) entries; take the same
@@ -304,18 +304,17 @@ void updateSmoothedPerCore(const Domain::SystemSnapshot& snap, RenderContext& ct
 
     const double alpha = computeAlpha(ctx.lastDeltaSeconds, ctx.refreshInterval);
     const size_t numCores = snap.cpuPerCore.size();
+    // Cores not yet in the vector -- all of them the first time the tab is shown -- start at their
+    // value instead of easing up from 0, like every other NowBar (initializeOrSmooth, #1012).
+    const size_t knownCores = std::min(ctx.smoothedPerCore->size(), numCores);
     ctx.smoothedPerCore->resize(numCores, 0.0);
 
     for (size_t i = 0; i < numCores; ++i)
     {
         const double target = clampPercent(snap.cpuPerCore[i].totalPercent);
         double& current = (*ctx.smoothedPerCore)[i];
-        if (ctx.lastDeltaSeconds <= 0.0F)
-        {
-            current = target;
-            continue;
-        }
-        current = clampPercent(smoothTowards(current, target, alpha));
+        const bool initialized = (i < knownCores) && (ctx.lastDeltaSeconds > 0.0F);
+        current = clampPercent(initializeOrSmooth(current, target, alpha, initialized));
     }
 }
 

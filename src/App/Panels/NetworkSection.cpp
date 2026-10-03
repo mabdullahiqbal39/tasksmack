@@ -72,6 +72,7 @@ void renderDiskIOSection(RenderContext& ctx)
         .smoothedReadBytesPerSec = ctx.smoothedDiskReadBytesPerSec,
         .smoothedWriteBytesPerSec = ctx.smoothedDiskWriteBytesPerSec,
         .smoothedInitialized = ctx.smoothedDiskInitialized,
+        .smoothedPerDisk = ctx.smoothedPerDisk,
         .fill = ctx.fill,
     };
     StorageSection::renderStorageSection(storageCtx);
@@ -225,7 +226,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
     const auto axis = aligned > 0 ? makeTimeAxisConfig(netTimestamps, ctx.maxHistorySeconds, ctx.historyScrollSeconds)
                                   : makeTimeAxisConfig({}, ctx.maxHistorySeconds, ctx.historyScrollSeconds);
 
-    std::vector<float> netTimes;
+    std::vector<double> netTimes;
     std::vector<float> sentData;
     std::vector<float> recvData;
     std::vector<float> ifaceSentData;
@@ -255,20 +256,15 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
     const double smoothedSent = ctx.smoothedNetSentBytesPerSec != nullptr ? *ctx.smoothedNetSentBytesPerSec : targetSent;
     const double smoothedRecv = ctx.smoothedNetRecvBytesPerSec != nullptr ? *ctx.smoothedNetRecvBytesPerSec : targetRecv;
 
-    // Calculate max across all data for consistent Y axis
-    double netMax = std::max({sentData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(sentData)),
-                              recvData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(recvData)),
-                              smoothedSent,
-                              smoothedRecv,
-                              1.0});
-    if (!ifaceSentData.empty())
-    {
-        netMax = std::max(netMax, static_cast<double>(*std::ranges::max_element(ifaceSentData)));
-    }
-    if (!ifaceRecvData.empty())
-    {
-        netMax = std::max(netMax, static_cast<double>(*std::ranges::max_element(ifaceRecvData)));
-    }
+    // One upper bound for the chart's Y axis and its bars, so a bar and its line show a value at the
+    // same height (#1003). It covers every series drawn on this axis, not just the totals: a
+    // selected interface is plotted here too, and total vs per-interface rates are derived
+    // independently, so the interface rate can exceed the total's. The interface vectors are empty
+    // when none is selected, and hold NaN where the interface was absent; maxOfSeries() ignores both.
+    const double netAxisUpper =
+        UI::Widgets::easedRateAxisUpperBound("##SystemNetHistory",
+                                             UI::Widgets::maxOfSeries(sentData, recvData, ifaceSentData, ifaceRecvData),
+                                             UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
     // Determine labels based on selection
     // Name the interface the way the picker above does (#1009).
@@ -279,12 +275,12 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
     const NowBar sentBar{.valueText = UI::Format::formatBytesPerSec(smoothedSent),
                          .label = sentBarLabel,
                          .tooltipText = {},
-                         .value01 = std::clamp(smoothedSent / netMax, 0.0, 1.0),
+                         .value01 = UI::Widgets::normalizeToUnitInterval(smoothedSent, netAxisUpper),
                          .color = theme.scheme().chartNetTx};
     const NowBar recvBar{.valueText = UI::Format::formatBytesPerSec(smoothedRecv),
                          .label = recvBarLabel,
                          .tooltipText = {},
-                         .value01 = std::clamp(smoothedRecv / netMax, 0.0, 1.0),
+                         .value01 = UI::Widgets::normalizeToUnitInterval(smoothedRecv, netAxisUpper),
                          .color = theme.scheme().chartNetRx};
 
     // Determine plot title based on selection
@@ -310,18 +306,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
     auto plot = [&]()
     {
         const UI::Widgets::HistoryChart chart(UI::Widgets::withHeight(
-            UI::Widgets::rateHistoryConfig("##SystemNetHistory",
-                                           axis.xMin,
-                                           axis.xMax,
-                                           formatAxisBytesPerSec,
-                                           // Every series drawn on this axis, not just the
-                                           // totals: a selected interface is plotted here too,
-                                           // and total vs per-interface rates are derived
-                                           // independently, so the interface rate can exceed
-                                           // the total's. The interface vectors are empty when
-                                           // none is selected; maxOfSeries() ignores those.
-                                           UI::Widgets::maxOfSeries(sentData, recvData, ifaceSentData, ifaceRecvData),
-                                           UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC),
+            UI::Widgets::rateHistoryConfigWithUpper("##SystemNetHistory", axis.xMin, axis.xMax, formatAxisBytesPerSec, netAxisUpper),
             plotHeight));
         if (chart.active())
         {
@@ -420,10 +405,10 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
                             ImGui::TextColored(theme.scheme().textPrimary, "%s:", ifaceDisplayName.c_str());
                             ImGui::TextColored(theme.scheme().chartNetTx,
                                                "  Sent: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(ifaceSentData[*idxVal])).c_str());
+                                               UI::Format::formatBytesPerSecOrNA(static_cast<double>(ifaceSentData[*idxVal])).c_str());
                             ImGui::TextColored(theme.scheme().chartNetRx,
                                                "  Received: %s",
-                                               UI::Format::formatBytesPerSec(static_cast<double>(ifaceRecvData[*idxVal])).c_str());
+                                               UI::Format::formatBytesPerSecOrNA(static_cast<double>(ifaceRecvData[*idxVal])).c_str());
                         }
                         else
                         {
@@ -595,7 +580,7 @@ void renderNetworkChartAndTable(RenderContext& ctx, const UI::Theme& theme, doub
 void renderNetworkSection(RenderContext& ctx)
 {
     const auto& theme = UI::Theme::get();
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
 
     // Network content first, at its own natural (non-stretching) height; the disk grid renders
     // after it and fills whatever's left via ImGui::GetContentRegionAvail() (see

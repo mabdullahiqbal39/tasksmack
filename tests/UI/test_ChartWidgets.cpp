@@ -1,11 +1,16 @@
 #include "UI/ChartWidgets.h"
+#include "UI/RateAxis.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <limits>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace UI::Widgets
@@ -168,6 +173,323 @@ TEST(NowBarTest, SelectTooltipFallsBackToLabelWhenValueTextEmpty)
     EXPECT_EQ(selectNowBarTooltip(bar), "CPU");
 }
 
+// ========== reduceSeriesKeepingGaps ==========
+
+TEST(ChartWidgetsReduceTest, ReductionKeepsAGapThatFallsBetweenPickedSamples)
+{
+    // The #1041 review case: 1,440 samples reduced to the 720-point cap pick indices 718 and 720,
+    // so a lone NaN at 719 used to vanish and the line bridged the missing reading.
+    constexpr int count = 1440;
+    constexpr int outCount = LINE_PLOT_MAX_POINTS_DENSE;
+    std::vector<float> x(count);
+    std::vector<float> y(count, 50.0F);
+    for (int i = 0; i < count; ++i)
+    {
+        x[static_cast<std::size_t>(i)] = static_cast<float>(i);
+    }
+    y[719] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> outX(outCount);
+    std::vector<float> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    int nanCount = 0;
+    for (const float v : outY)
+    {
+        nanCount += std::isnan(v) ? 1 : 0;
+    }
+    EXPECT_EQ(nanCount, 1);
+    EXPECT_FLOAT_EQ(outY.front(), 50.0F);
+    EXPECT_FLOAT_EQ(outY.back(), 50.0F);
+    EXPECT_FLOAT_EQ(outX.back(), static_cast<float>(count - 1));
+}
+
+TEST(ChartWidgetsReduceTest, ReductionOfAFiniteSeriesIsAPlainStride)
+{
+    constexpr int count = 10;
+    constexpr int outCount = 4;
+    std::vector<double> x(count);
+    std::vector<double> y(count);
+    for (int i = 0; i < count; ++i)
+    {
+        x[static_cast<std::size_t>(i)] = static_cast<double>(i);
+        y[static_cast<std::size_t>(i)] = static_cast<double>(i) * 10.0;
+    }
+
+    std::vector<double> outX(outCount);
+    std::vector<double> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    // Indices k * 9 / 3 = 0, 3, 6, 9.
+    EXPECT_DOUBLE_EQ(outY[0], 0.0);
+    EXPECT_DOUBLE_EQ(outY[1], 30.0);
+    EXPECT_DOUBLE_EQ(outY[2], 60.0);
+    EXPECT_DOUBLE_EQ(outY[3], 90.0);
+    EXPECT_DOUBLE_EQ(outX[3], 9.0);
+}
+
+TEST(ChartWidgetsReduceTest, ReductionKeepsALeadingGap)
+{
+    constexpr int count = 10;
+    constexpr int outCount = 4;
+    std::vector<float> x(count, 0.0F);
+    std::vector<float> y(count, 1.0F);
+    y[0] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> outX(outCount);
+    std::vector<float> outY(outCount);
+    reduceSeriesKeepingGaps(x.data(), y.data(), count, outCount, outX.data(), outY.data());
+
+    EXPECT_TRUE(std::isnan(outY[0]));
+    EXPECT_FLOAT_EQ(outY[1], 1.0F);
+}
+
+// ========== reduceSeriesMinMax (#1010) ==========
+
+TEST(ChartWidgetsReduceTest, BucketWidthIsAPowerOfTwoThatHoldsAsTheSpanDrifts)
+{
+    // 300 s into 239 buckets: 1.255 s rounds up to 2 s, and stays 2 s as the span drifts.
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(300.0, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(299.9, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(300.1, 239), 2.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(30.0, 239), 0.25); // 0.1255 rounds up to 2^-2
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(0.0, 239), 0.0);
+    EXPECT_DOUBLE_EQ(minMaxBucketWidth(std::numeric_limits<double>::quiet_NaN(), 239), 0.0);
+}
+
+namespace
+{
+// 100 ms samples over 300 s, as "seconds before now" (the last sample at x = 0).
+struct ReduceFixture
+{
+    static constexpr int COUNT = 3000;
+    std::vector<double> x = std::vector<double>(COUNT);
+    std::vector<double> y = std::vector<double>(COUNT, 10.0);
+    ReduceFixture()
+    {
+        for (int i = 0; i < COUNT; ++i)
+        {
+            x[static_cast<std::size_t>(i)] = (static_cast<double>(i) - (COUNT - 1)) * 0.1;
+        }
+    }
+};
+} // namespace
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionKeepsASingleSamplePeak)
+{
+    ReduceFixture f;
+    f.y[1234] = 99.0; // one sample; a stride of ~4 would usually skip it
+    std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+    const int written =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 1000.0, outX.data(), outY.data());
+    ASSERT_GT(written, 0);
+    ASSERT_LE(written, LINE_PLOT_MAX_POINTS_DENSE);
+    const auto peak = std::ranges::max(std::span(outY).first(static_cast<std::size_t>(written)));
+    EXPECT_DOUBLE_EQ(peak, 99.0);
+    // The newest sample is never dropped.
+    EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], 0.0);
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionIsStableAsTheWindowScrolls)
+{
+    // Every frame, x shifts left by the time elapsed and the anchor (now) moves right by the same
+    // amount, so each sample's absolute time -- and therefore its bucket -- is unchanged.
+    ReduceFixture f;
+    for (int i = 0; i < ReduceFixture::COUNT; ++i)
+    {
+        f.y[static_cast<std::size_t>(i)] = static_cast<double>((i * 37) % 101); // jagged
+    }
+    std::vector<double> firstX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> firstY(LINE_PLOT_MAX_POINTS_DENSE);
+    const double now = 5000.03;
+    const int firstCount =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now, firstX.data(), firstY.data());
+
+    for (const double elapsed : {0.016, 0.033, 0.05, 0.083})
+    {
+        std::vector<double> shifted(f.x);
+        for (auto& v : shifted)
+        {
+            v -= elapsed;
+        }
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int count = reduceSeriesMinMax(
+            shifted.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now + elapsed, outX.data(), outY.data());
+        ASSERT_EQ(count, firstCount) << "elapsed " << elapsed;
+        for (int k = 0; k < count; ++k)
+        {
+            EXPECT_DOUBLE_EQ(outY[static_cast<std::size_t>(k)], firstY[static_cast<std::size_t>(k)]) << "point " << k;
+        }
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionKeepsAGap)
+{
+    ReduceFixture f;
+    f.y[1500] = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+    std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+    const int written =
+        reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 0.0, outX.data(), outY.data());
+    int gaps = 0;
+    for (int k = 0; k < written; ++k)
+    {
+        gaps += std::isnan(outY[static_cast<std::size_t>(k)]) ? 1 : 0;
+    }
+    EXPECT_EQ(gaps, 1);
+    // Points stay in x order, so the line runs left to right through the gap.
+    for (int k = 1; k < written; ++k)
+    {
+        EXPECT_LT(outX[static_cast<std::size_t>(k) - 1], outX[static_cast<std::size_t>(k)]);
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionAlwaysEndsAtTheNewestAndStartsAtTheOldestSample)
+{
+    // A flat series: every bucket's min and max are its first sample, so without the end samples
+    // the line would stop up to a bucket width short of x = 0 and start late on the left.
+    for (const double now : {1000.0, 1000.37, 1000.81}) // endpoints at different places in their buckets
+    {
+        ReduceFixture f;
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, now, outX.data(), outY.data());
+        ASSERT_GT(written, 1);
+        ASSERT_LE(written, LINE_PLOT_MAX_POINTS_DENSE);
+        EXPECT_DOUBLE_EQ(outX.front(), f.x.front()) << "now " << now;
+        EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], f.x.back()) << "now " << now;
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionNeverExceedsItsBudget)
+{
+    // Worst case: every bucket has a distinct min, max and gap.
+    ReduceFixture f;
+    for (int i = 0; i < ReduceFixture::COUNT; ++i)
+    {
+        f.y[static_cast<std::size_t>(i)] = (i % 7 == 3) ? std::numeric_limits<double>::quiet_NaN() : static_cast<double>((i * 13) % 17);
+    }
+    for (const int budget : {30, 31, 32, 100, LINE_PLOT_MAX_POINTS_DENSE})
+    {
+        std::vector<double> outX(static_cast<std::size_t>(budget));
+        std::vector<double> outY(static_cast<std::size_t>(budget));
+        const int written = reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, budget, 7.3, outX.data(), outY.data());
+        EXPECT_LE(written, budget);
+        EXPECT_DOUBLE_EQ(outX[static_cast<std::size_t>(written) - 1], f.x.back()) << "budget " << budget;
+    }
+}
+
+namespace
+{
+// Asserts that no two consecutive finite output points have a NaN source sample between them --
+// which is what drawing the line across a gap would mean.
+void expectNoBridgedGap(const ReduceFixture& f, const std::vector<double>& outX, const std::vector<double>& outY, int written)
+{
+    const auto sourceIndexOf = [&](double x)
+    {
+        return static_cast<int>(std::lround((x / 0.1) + (ReduceFixture::COUNT - 1)));
+    };
+    for (int k = 1; k < written; ++k)
+    {
+        const auto a = static_cast<std::size_t>(k - 1);
+        const auto b = static_cast<std::size_t>(k);
+        if (std::isnan(outY[a]) || std::isnan(outY[b]))
+        {
+            continue;
+        }
+        for (int src = sourceIndexOf(outX[a]) + 1; src < sourceIndexOf(outX[b]); ++src)
+        {
+            EXPECT_FALSE(std::isnan(f.y[static_cast<std::size_t>(src)])) << "points " << k - 1 << "-" << k << " bridge the gap at " << src;
+        }
+    }
+}
+} // namespace
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionNeverBridgesAGapWhateverItsLayoutInOneBucket)
+{
+    // With now = 0.05 and 100 ms samples, the 2 s buckets hold 20 samples each; 1499..1518 is one
+    // bucket. Each layout puts the bucket's min and max between gaps, the case that used to bridge.
+    struct Layout
+    {
+        std::vector<int> gaps;
+        int maxAt;
+        int minAt;
+    };
+    const std::vector<Layout> layouts{
+        {.gaps = {1504}, .maxAt = 1500, .minAt = 1510},             // one run, extremes either side
+        {.gaps = {1504, 1512}, .maxAt = 1508, .minAt = 1516},       // two runs
+        {.gaps = {1504, 1508, 1512}, .maxAt = 1506, .minAt = 1510}, // three runs (#1051 review)
+        {.gaps = {1502, 1503, 1509, 1515}, .maxAt = 1506, .minAt = 1512},
+    };
+    for (const auto& layout : layouts)
+    {
+        ReduceFixture f;
+        for (const int i : layout.gaps)
+        {
+            f.y[static_cast<std::size_t>(i)] = std::numeric_limits<double>::quiet_NaN();
+        }
+        f.y[static_cast<std::size_t>(layout.maxAt)] = 50.0;
+        f.y[static_cast<std::size_t>(layout.minAt)] = 0.5;
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(f.x.data(), f.y.data(), ReduceFixture::COUNT, LINE_PLOT_MAX_POINTS_DENSE, 0.05, outX.data(), outY.data());
+        SCOPED_TRACE(layout.gaps.size());
+        expectNoBridgedGap(f, outX, outY, written);
+    }
+}
+
+TEST(ChartWidgetsReduceTest, ReductionOfABuiltTimeAxisIsStableAsNowAdvances)
+{
+    // The production path: buildTimeAxis(timestamps, n, now) then a reduction anchored at the same
+    // now. With a float axis, x + now did not recover the timestamp exactly and the error changed as
+    // now advanced, so a sample this close to a bucket boundary could change bucket between frames
+    // (#1051 review). Timestamps are large, like steady_clock seconds on a long-running machine.
+    constexpr std::size_t COUNT = 3000;
+    std::vector<double> timestamps(COUNT);
+    std::vector<double> values(COUNT);
+    const double start = 864'000.0; // ten days of uptime
+    for (std::size_t i = 0; i < COUNT; ++i)
+    {
+        timestamps[i] = start + (static_cast<double>(i) * 0.1);
+        values[i] = static_cast<double>((i * 37) % 101);
+    }
+    // One sample 2 microseconds before a 2 s bucket boundary, with a value that makes it a bucket max.
+    timestamps[1500] = 864'150.0 - 2e-6;
+    values[1500] = 500.0;
+
+    std::vector<double> firstY;
+    for (const double elapsed : {0.0, 0.0161, 0.0334, 0.0517, 0.0833, 0.1})
+    {
+        const double now = timestamps.back() + 0.04 + elapsed;
+        const auto x = buildTimeAxis(timestamps, COUNT, now);
+        std::vector<double> outX(LINE_PLOT_MAX_POINTS_DENSE);
+        std::vector<double> outY(LINE_PLOT_MAX_POINTS_DENSE);
+        const int written =
+            reduceSeriesMinMax(x.data(), values.data(), static_cast<int>(COUNT), LINE_PLOT_MAX_POINTS_DENSE, now, outX.data(), outY.data());
+        outY.resize(static_cast<std::size_t>(written));
+        if (firstY.empty())
+        {
+            firstY = outY;
+            continue;
+        }
+        EXPECT_EQ(outY, firstY) << "elapsed " << elapsed;
+    }
+}
+
+TEST(ChartWidgetsReduceTest, MinMaxReductionFallsBackForAnUnusableSpan)
+{
+    // x not increasing (all equal): no usable bucket width, so it falls back to the stride.
+    std::vector<float> x(10, 0.0F);
+    std::vector<float> y(10, 1.0F);
+    std::vector<float> outX(4);
+    std::vector<float> outY(4);
+    EXPECT_EQ(reduceSeriesMinMax(x.data(), y.data(), 10, 4, 0.0, outX.data(), outY.data()), 4);
+}
+
 // ========== Axis formatters ==========
 
 TEST(ChartWidgetsFormattersTest, FormatAxisLocalizedHandlesSuffixes)
@@ -294,31 +616,73 @@ TEST(ChartWidgetsFormattersTest, FormatAxisBytesPerSecHandlesMegaAndGigaSuffixes
     EXPECT_EQ(std::string(buf), "2.0GB/s");
 }
 
-// ========== seriesMax / normalizeToUnitInterval ==========
+// ========== normalizeToUnitInterval ==========
 
-TEST(ChartWidgetsTest, SeriesMaxReturnsFloorWhenValuesEmptyAndCurrentBelowFloor)
+TEST(ChartWidgetsTest, NormalizeToUnitIntervalScalesAndClamps)
 {
-    EXPECT_DOUBLE_EQ(seriesMax({}, 0.5), 1.0);
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(25.0, 100.0), 0.25);
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(150.0, 100.0), 1.0);
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(-5.0, 100.0), 0.0);
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(5.0, 0.0), 0.0);
 }
 
-TEST(ChartWidgetsTest, SeriesMaxReturnsCurrentWhenValuesEmptyAndCurrentAboveFloor)
+TEST(ChartWidgetsTest, NormalizeToUnitIntervalOfAMissingValueIsAnEmptyBar)
 {
-    EXPECT_DOUBLE_EQ(seriesMax({}, 5.0), 5.0);
+    // std::clamp passes NaN straight through; a bar with no value must be empty, not NaN.
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(std::numeric_limits<double>::quiet_NaN(), 100.0), 0.0);
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(5.0, std::numeric_limits<double>::quiet_NaN()), 0.0);
 }
 
-TEST(ChartWidgetsTest, SeriesMaxReturnsHistoryMaxWhenLargerThanCurrentAndFloor)
+// A bar normalised against its chart's axis bound sits at the same height as its line (#1003).
+TEST(ChartWidgetsTest, ABarScaledToItsAxisMatchesItsLine)
 {
-    EXPECT_DOUBLE_EQ(seriesMax({2.0, 8.0, 3.0}, 4.0), 8.0);
+    const double upper = rateAxisUpperBound(1000.0, RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+    const auto config = rateHistoryConfigWithUpper("##t", -300.0, 0.0, formatAxisBytesPerSec, upper);
+    ASSERT_TRUE(config.yLimits.has_value());
+    // The line's height for the peak value, as a fraction of the axis, equals the bar's.
+    const double lineFraction = 1000.0 / config.yLimits.value_or(std::pair{0.0, 1.0}).second;
+    EXPECT_DOUBLE_EQ(normalizeToUnitInterval(1000.0, upper), lineFraction);
+    EXPECT_LT(lineFraction, 1.0); // headroom above the peak, never a full bar beside a line at 91 %
 }
 
-TEST(ChartWidgetsTest, SeriesMaxReturnsCurrentWhenLargerThanHistory)
+// ========== forEachFiniteRun (#989) ==========
+
+namespace
 {
-    EXPECT_DOUBLE_EQ(seriesMax({2.0, 3.0}, 10.0), 10.0);
+[[nodiscard]] std::vector<std::pair<int, int>> finiteRuns(const std::vector<float>& values)
+{
+    std::vector<std::pair<int, int>> runs;
+    UI::Widgets::forEachFiniteRun(
+        values.data(), static_cast<int>(values.size()), [&](int start, int length) { runs.emplace_back(start, length); });
+    return runs;
+}
+} // namespace
+
+TEST(ChartWidgetsTest, FiniteRunsOfAnUnbrokenSeriesIsOneRun)
+{
+    EXPECT_EQ(finiteRuns({1.0F, 2.0F, 3.0F}), (std::vector<std::pair<int, int>>{{0, 3}}));
 }
 
-TEST(ChartWidgetsTest, SeriesMaxReturnsFloorWhenAllValuesBelowOne)
+// A missing reading in the middle splits the series, so the fill leaves a gap there.
+TEST(ChartWidgetsTest, FiniteRunsSplitAtNaN)
 {
-    EXPECT_DOUBLE_EQ(seriesMax({0.1, 0.2}, 0.3), 1.0);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(finiteRuns({1.0F, 2.0F, nan, 4.0F, 5.0F}), (std::vector<std::pair<int, int>>{{0, 2}, {3, 2}}));
+    EXPECT_EQ(finiteRuns({1.0F, nan, nan, 4.0F}), (std::vector<std::pair<int, int>>{{0, 1}, {3, 1}}));
+}
+
+TEST(ChartWidgetsTest, FiniteRunsSkipLeadingAndTrailingGaps)
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_EQ(finiteRuns({nan, 2.0F, 3.0F, nan}), (std::vector<std::pair<int, int>>{{1, 2}}));
+}
+
+TEST(ChartWidgetsTest, FiniteRunsOfNothingFiniteIsNoRuns)
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_TRUE(finiteRuns({}).empty());
+    EXPECT_TRUE(finiteRuns({nan, nan}).empty());
+    EXPECT_TRUE(finiteRuns({std::numeric_limits<float>::infinity()}).empty());
 }
 
 TEST(ChartWidgetsTest, NormalizeToUnitIntervalScalesWithinRange)

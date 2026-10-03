@@ -8,6 +8,7 @@
 #include "UI/Format.h"
 #include "UI/HistoryPlotHeight.h"
 #include "UI/IconsFontAwesome6.h"
+#include "UI/RateAxis.h"
 #include "UI/Theme.h"
 
 #include <imgui.h>
@@ -17,6 +18,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <format>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -73,7 +76,7 @@ constexpr float MIN_DISK_CELL_WIDTH_EM = 30.0F;
 /// single-line label row, so the resulting vertical overhead is the same across all disks and
 /// doesn't change frame to frame on its own.
 void renderDiskCell(const std::string& deviceName,
-                    const std::vector<float>& timeData,
+                    const std::vector<double>& timeData,
                     const std::vector<float>& readData,
                     const std::vector<float>& writeData,
                     double currentRead,
@@ -83,22 +86,31 @@ void renderDiskCell(const std::string& deviceName,
                     float cellHeight,
                     std::optional<float>& cachedOverhead)
 {
-    const double diskMax = std::max({readData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(readData)),
-                                     writeData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(writeData)),
-                                     currentRead,
-                                     currentWrite,
-                                     1.0});
+    // One upper bound for the chart's Y axis and its bars, so a bar and its line show a value at the
+    // same height (#1003). A per-disk series holds NaN for samples where the disk was absent, and
+    // currentRead/Write are NaN when it is absent from the latest sample (#1015): maxOfSeries skips
+    // them, and the bars show N/A rather than a false 0 B/s, as the GPU fan bar does.
+    const double diskAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+        "##DiskAxis", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
-    const NowBar readBar{.valueText = UI::Format::formatBytesPerSec(currentRead),
-                         .label = "Read",
-                         .tooltipText = {},
-                         .value01 = normalizeToUnitInterval(currentRead, diskMax),
-                         .color = theme.scheme().chartIo};
-    const NowBar writeBar{.valueText = UI::Format::formatBytesPerSec(currentWrite),
-                          .label = "Write",
-                          .tooltipText = {},
-                          .value01 = normalizeToUnitInterval(currentWrite, diskMax),
-                          .color = theme.scheme().chartIoWrite};
+    const auto makeBar = [&](const char* label, double current, const ImVec4& color)
+    {
+        if (!std::isfinite(current))
+        {
+            return NowBar{.valueText = "N/A",
+                          .label = label,
+                          .tooltipText = std::format("{}: not reported this sample", label),
+                          .value01 = 0.0,
+                          .color = theme.scheme().textMuted};
+        }
+        return NowBar{.valueText = UI::Format::formatBytesPerSec(current),
+                      .label = label,
+                      .tooltipText = {},
+                      .value01 = normalizeToUnitInterval(current, diskAxisUpper),
+                      .color = color};
+    };
+    const NowBar readBar = makeBar("Read", currentRead, theme.scheme().chartIo);
+    const NowBar writeBar = makeBar("Write", currentWrite, theme.scheme().chartIoWrite);
 
     const float cellContentTop = ImGui::GetCursorPosY();
     ImGui::TextColored(theme.scheme().textPrimary, "%.*s", static_cast<int>(deviceName.size()), deviceName.data());
@@ -122,12 +134,8 @@ void renderDiskCell(const std::string& deviceName,
         // this. ImPlotFlags_NoTitle keeps the plot title hidden (deviceName has no "##" prefix to
         // hide it via ImPlot's usual Label##ID convention) without needing to allocate a new
         // string just to add one (#823 review).
-        auto diskCfg = UI::Widgets::rateHistoryConfig(deviceName.c_str(),
-                                                      axisConfig.xMin,
-                                                      axisConfig.xMax,
-                                                      formatAxisBytesPerSec,
-                                                      UI::Widgets::maxOfSeries(readData, writeData),
-                                                      UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
+        auto diskCfg = UI::Widgets::rateHistoryConfigWithUpper(
+            deviceName.c_str(), axisConfig.xMin, axisConfig.xMax, formatAxisBytesPerSec, diskAxisUpper);
         diskCfg.flags |= ImPlotFlags_NoTitle;
         diskCfg.height = plotHeight;
         const UI::Widgets::HistoryChart chart(diskCfg);
@@ -165,10 +173,10 @@ void renderDiskCell(const std::string& deviceName,
                         ImGui::Separator();
                         ImGui::TextColored(theme.scheme().chartIo,
                                            "Read: %s",
-                                           UI::Format::formatBytesPerSec(static_cast<double>(readData[*idxVal])).c_str());
+                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(readData[*idxVal])).c_str());
                         ImGui::TextColored(theme.scheme().chartIoWrite,
                                            "Write: %s",
-                                           UI::Format::formatBytesPerSec(static_cast<double>(writeData[*idxVal])).c_str());
+                                           UI::Format::formatBytesPerSecOrNA(static_cast<double>(writeData[*idxVal])).c_str());
                         ImGui::EndTooltip();
                     }
                 }
@@ -203,7 +211,7 @@ void updateSmoothedDiskIO(double targetRead, double targetWrite, float deltaTime
 void renderStorageSection(RenderContext& ctx)
 {
     const auto& theme = UI::Theme::get();
-    const double nowSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double nowSeconds = UI::Widgets::historyFrameNowSeconds(); // Shared with plotLineWithFill (see it)
 
     if (ctx.publication == nullptr)
     {
@@ -219,7 +227,7 @@ void renderStorageSection(RenderContext& ctx)
                                           : makeTimeAxisConfig({}, ctx.maxHistorySeconds, ctx.historyScrollSeconds);
 
     // Build shared time axis (float, relative)
-    std::vector<float> diskTimes;
+    std::vector<double> diskTimes;
     if (historySize > 0)
     {
         diskTimes = buildTimeAxis(diskTimestamps, historySize, nowSeconds);
@@ -241,6 +249,15 @@ void renderStorageSection(RenderContext& ctx)
             theme.scheme().textPrimary, ICON_FA_HARD_DRIVE "  Disk I/O by Device (%zu disks, %zu samples)", diskCount, historySize);
 
         // Pre-build device name → snapshot lookup to avoid O(n²) linear scans in the cell loop.
+        const double diskAlpha = computeAlpha(ctx.lastDeltaSeconds, ctx.refreshInterval);
+        if (ctx.smoothedPerDisk != nullptr)
+        {
+            // Forget disks no longer listed (unplugged and pruned from the history), so the map
+            // stays the size of the grid.
+            std::erase_if(*ctx.smoothedPerDisk,
+                          [&](const auto& entry)
+                          { return std::ranges::none_of(perDisk, [&](const auto& disk) { return disk.deviceName == entry.first; }); });
+        }
         std::unordered_map<std::string, const Domain::DiskSnapshot*> diskLookup;
         diskLookup.reserve(diskSnap.disks.size());
         for (const auto& d : diskSnap.disks)
@@ -334,15 +351,34 @@ void renderStorageSection(RenderContext& ctx)
                 }
 
                 // Per-disk snapshot values for NowBars (O(1) lookup via pre-built map).
-                double diskRead = 0.0;
-                double diskWrite = 0.0;
+                // NaN if the disk is missing from the latest sample: renderDiskCell shows N/A, not 0.
+                double diskRead = std::numeric_limits<double>::quiet_NaN();
+                double diskWrite = std::numeric_limits<double>::quiet_NaN();
                 if (const auto it = diskLookup.find(disk.deviceName); it != diskLookup.end())
                 {
                     diskRead = it->second->readBytesPerSec;
                     diskWrite = it->second->writeBytesPerSec;
                 }
+                if (ctx.smoothedPerDisk != nullptr)
+                {
+                    auto& smoothed = (*ctx.smoothedPerDisk)[disk.deviceName];
+                    if (std::isfinite(diskRead) && std::isfinite(diskWrite))
+                    {
+                        smoothed.readBytesPerSec = initializeOrSmooth(smoothed.readBytesPerSec, diskRead, diskAlpha, smoothed.initialized);
+                        smoothed.writeBytesPerSec =
+                            initializeOrSmooth(smoothed.writeBytesPerSec, diskWrite, diskAlpha, smoothed.initialized);
+                        smoothed.initialized = true;
+                        diskRead = smoothed.readBytesPerSec;
+                        diskWrite = smoothed.writeBytesPerSec;
+                    }
+                    else
+                    {
+                        // Absent this sample: the bars show N/A, and start afresh when the disk returns.
+                        smoothed.initialized = false;
+                    }
+                }
 
-                const std::vector<float> cellTimes(diskTimes.end() - static_cast<std::ptrdiff_t>(alignedCount), diskTimes.end());
+                const std::vector<double> cellTimes(diskTimes.end() - static_cast<std::ptrdiff_t>(alignedCount), diskTimes.end());
                 renderDiskCell(
                     disk.deviceName, cellTimes, readData, writeData, diskRead, diskWrite, diskAxis, theme, cellHeight, cachedOverhead);
             },
@@ -358,7 +394,7 @@ void renderStorageSection(RenderContext& ctx)
         const size_t alignedDisk = std::min({historySize, diskReadHist.size(), diskWriteHist.size()});
 
         // Take the newest alignedDisk entries of each series, so read, write and time line up by sample.
-        const std::vector<float> aggregateTimes = buildTimeAxis(diskTimestamps, alignedDisk, nowSeconds);
+        const std::vector<double> aggregateTimes = buildTimeAxis(diskTimestamps, alignedDisk, nowSeconds);
         const auto readTail = tailAlignedSpan(diskReadHist, alignedDisk).values;
         const auto writeTail = tailAlignedSpan(diskWriteHist, alignedDisk).values;
         std::vector<float> readData;
@@ -371,22 +407,19 @@ void renderStorageSection(RenderContext& ctx)
             writeData.push_back(static_cast<float>(writeTail[i]));
         }
 
-        // Calculate max across all data for consistent Y axis
-        const double diskMax = std::max({readData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(readData)),
-                                         writeData.empty() ? 1.0 : static_cast<double>(*std::ranges::max_element(writeData)),
-                                         smoothedRead,
-                                         smoothedWrite,
-                                         1.0});
+        // One upper bound for the chart's Y axis and its bars (#1003).
+        const double diskAxisUpper = UI::Widgets::easedRateAxisUpperBound(
+            "##SystemDiskHistory", UI::Widgets::maxOfSeries(readData, writeData), UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC);
 
         const NowBar readBar{.valueText = UI::Format::formatBytesPerSec(smoothedRead),
                              .label = "Disk Read",
                              .tooltipText = {},
-                             .value01 = std::clamp(smoothedRead / diskMax, 0.0, 1.0),
+                             .value01 = normalizeToUnitInterval(smoothedRead, diskAxisUpper),
                              .color = theme.scheme().chartIo};
         const NowBar writeBar{.valueText = UI::Format::formatBytesPerSec(smoothedWrite),
                               .label = "Disk Write",
                               .tooltipText = {},
-                              .value01 = std::clamp(smoothedWrite / diskMax, 0.0, 1.0),
+                              .value01 = normalizeToUnitInterval(smoothedWrite, diskAxisUpper),
                               .color = theme.scheme().chartIoWrite};
 
         // Shares the tab's height with the network chart above it (#959).
@@ -394,12 +427,8 @@ void renderStorageSection(RenderContext& ctx)
         auto diskPlot = [&]()
         {
             const UI::Widgets::HistoryChart chart(
-                UI::Widgets::withHeight(UI::Widgets::rateHistoryConfig("##SystemDiskHistory",
-                                                                       diskAxis.xMin,
-                                                                       diskAxis.xMax,
-                                                                       formatAxisBytesPerSec,
-                                                                       UI::Widgets::maxOfSeries(readData, writeData),
-                                                                       UI::Widgets::RATE_AXIS_MIN_SPAN_BYTES_PER_SEC),
+                UI::Widgets::withHeight(UI::Widgets::rateHistoryConfigWithUpper(
+                                            "##SystemDiskHistory", diskAxis.xMin, diskAxis.xMax, formatAxisBytesPerSec, diskAxisUpper),
                                         plotHeight));
             if (chart.active())
             {
