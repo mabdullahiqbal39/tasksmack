@@ -133,7 +133,7 @@ void renderMemorySection(RenderContext& ctx, const std::vector<double>& timestam
                                  memData.data(),
                                  UI::Format::checkedCount(memData.size()),
                                  theme.scheme().chartMemory,
-                                 std::nullopt,
+                                 theme.scheme().chartMemoryFill,
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -146,7 +146,7 @@ void renderMemorySection(RenderContext& ctx, const std::vector<double>& timestam
                                  cachedData.data(),
                                  UI::Format::checkedCount(cachedData.size()),
                                  theme.scheme().chartCpu,
-                                 std::nullopt,
+                                 theme.scheme().chartCpuFill,
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -159,7 +159,7 @@ void renderMemorySection(RenderContext& ctx, const std::vector<double>& timestam
                                  swapData.data(),
                                  UI::Format::checkedCount(swapData.size()),
                                  theme.scheme().chartIo,
-                                 std::nullopt,
+                                 theme.scheme().chartIoFill,
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -169,11 +169,12 @@ void renderMemorySection(RenderContext& ctx, const std::vector<double>& timestam
             {
                 const std::array<double, 2> xLine = {axisConfig.xMin, axisConfig.xMax};
                 const std::array<double, 2> yLine = {peakMemPercent, peakMemPercent};
-                ImPlot::PlotLine(PEAK_LABEL,
-                                 xLine.data(),
-                                 yLine.data(),
-                                 2,
-                                 {ImPlotProp_LineColor, theme.scheme().textWarning, ImPlotProp_LineWeight, UI::Widgets::lineWeight(1.5F)});
+                ImPlot::PlotLine(
+                    PEAK_LABEL,
+                    xLine.data(),
+                    yLine.data(),
+                    2,
+                    {ImPlotProp_LineColor, theme.scheme().chartPeakLine, ImPlotProp_LineWeight, UI::Widgets::lineWeight(1.5F)});
             }
 
             if (ImPlot::IsPlotHovered())
@@ -203,7 +204,7 @@ void renderMemorySection(RenderContext& ctx, const std::vector<double>& timestam
                     if (peakMemPercent > 0.0)
                     {
                         rows.push_back({.label = PEAK_LABEL,
-                                        .color = theme.scheme().textWarning,
+                                        .color = theme.scheme().chartPeakLine,
                                         .value = UI::Format::percentCompact(peakMemPercent)});
                     }
                     UI::Widgets::renderHistoryTooltip(timeData[*idxVal], rows);

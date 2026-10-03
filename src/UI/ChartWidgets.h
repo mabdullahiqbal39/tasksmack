@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <format>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -87,7 +88,9 @@ inline constexpr ImDrawListFlags CHART_ANTI_ALIASING_FLAGS_MASK =
     return flags & ~CHART_ANTI_ALIASING_FLAGS_MASK;
 }
 
-inline constexpr ImPlotFlags PLOT_FLAGS_DEFAULT = ImPlotFlags_NoMenus;
+// NoMouseText: every history chart has its own hover tooltip (renderHistoryTooltip), so ImPlot's raw
+// "-16, 31.0" cursor readout was a second, unlabelled and partly hidden readout of the same point (#1039).
+inline constexpr ImPlotFlags PLOT_FLAGS_DEFAULT = ImPlotFlags_NoMenus | ImPlotFlags_NoMouseText;
 inline constexpr ImPlotAxisFlags X_AXIS_FLAGS_DEFAULT = ImPlotAxisFlags_NoHighlight;
 inline constexpr ImPlotAxisFlags Y_AXIS_FLAGS_DEFAULT = ImPlotAxisFlags_NoHighlight;
 inline constexpr float HISTORY_PLOT_HEIGHT_DEFAULT = 180.0F;
@@ -398,6 +401,174 @@ template<typename TX, typename TY>
     return written;
 }
 
+/// Most series reduceAlignedSeries() can select points by (see there).
+inline constexpr std::size_t MAX_ALIGNED_KEY_SERIES = 4;
+
+/// Reduce series that share one x axis to at most `maxOut` common points, in place: the stacked
+/// bands and lines a chart draws with ImPlot directly, which plotLineWithFill() cannot reduce
+/// because each series would keep different samples and the bands would no longer line up (#1022).
+///
+/// The same bucketing as reduceSeriesMinMax(), anchored at `xOffset`: each bucket keeps, for every
+/// series in `keyed`, its lowest and highest sample and its first gap (NaN), plus the series' first
+/// and last samples. The kept indices are then applied to `x`, every `keyed` series and every
+/// `carried` series (drawn alongside but not used to choose points), so all stay aligned and each
+/// keyed series keeps its peaks. When any keyed series has two or more gap runs in a bucket, the
+/// whole bucket collapses: it keeps only its gap points, NaN in every series, plus the series' end
+/// samples. Collapsing only that series' extrema would not do: another series' picks would still give
+/// it finite points on both sides of a later gap and draw it across that gap (#1061 review), and the
+/// carried series are built from the keyed ones. With an unusable span the series are stride-reduced.
+/// Series no longer than `maxOut` are left unchanged. Every series must be as long as `x`.
+inline void reduceAlignedSeries(std::vector<double>& x,
+                                std::initializer_list<std::vector<double>*> keyed,
+                                std::initializer_list<std::vector<double>*> carried,
+                                int maxOut,
+                                double xOffset)
+{
+    const int count = UI::Format::checkedCount(x.size());
+    const auto keyCount = static_cast<int>(keyed.size());
+    if (count <= maxOut || maxOut < 2 || keyCount == 0 || keyed.size() > MAX_ALIGNED_KEY_SERIES)
+    {
+        return;
+    }
+
+    // Keeps source index `pick` as output point `written`. Picks ascend and each is at or after its
+    // output slot, so compacting in place never overwrites a sample still to be read.
+    // With `asGap`, every series gets NaN there instead of its sample.
+    int written = 0;
+    const auto keep = [&](int pick, bool asGap)
+    {
+        const auto copy = [&](std::vector<double>& series)
+        {
+            series[static_cast<std::size_t>(written)] =
+                asGap ? std::numeric_limits<double>::quiet_NaN() : series[static_cast<std::size_t>(pick)];
+        };
+        x[static_cast<std::size_t>(written)] = x[static_cast<std::size_t>(pick)];
+        for (auto* series : keyed)
+        {
+            copy(*series);
+        }
+        for (auto* series : carried)
+        {
+            copy(*series);
+        }
+        ++written;
+    };
+
+    // At most three points per keyed series per bucket plus the two end samples, over at most
+    // bucketCount + 1 buckets (see reduceSeriesMinMax()).
+    const int bucketCount = ((maxOut - 2) / (3 * keyCount)) - 1;
+    const double width = (bucketCount > 0) ? minMaxBucketWidth(x.back() - x.front(), bucketCount) : 0.0;
+    if (width <= 0.0)
+    {
+        // As reduceSeriesKeepingGaps(): a point whose stride skipped a gap in any keyed series is a gap.
+        int previousSource = -1;
+        for (int k = 0; k < maxOut; ++k)
+        {
+            const auto source = static_cast<int>((static_cast<std::size_t>(k) * static_cast<std::size_t>(count - 1)) /
+                                                 static_cast<std::size_t>(maxOut - 1));
+            bool skippedGap = false;
+            for (const auto* series : keyed)
+            {
+                for (int i = previousSource + 1; i <= source && !skippedGap; ++i)
+                {
+                    skippedGap = !std::isfinite((*series)[static_cast<std::size_t>(i)]);
+                }
+            }
+            keep(source, skippedGap);
+            previousSource = source;
+        }
+    }
+    else
+    {
+        const auto bucketOf = [&](int index)
+        {
+            return std::floor((x[static_cast<std::size_t>(index)] + xOffset) / width);
+        };
+        int bucketStart = 0;
+        while (bucketStart < count)
+        {
+            const double bucket = bucketOf(bucketStart);
+            int next = bucketStart;
+            while (next < count && bucketOf(next) == bucket)
+            {
+                ++next;
+            }
+
+            std::array<int, (3 * MAX_ALIGNED_KEY_SERIES) + 2> picks{};
+            picks.fill(-1);
+            std::size_t pickCount = 0;
+            std::array<int, MAX_ALIGNED_KEY_SERIES> gapPicks{};
+            std::size_t gapCount = 0;
+            bool collapseBucket = false;
+            picks[pickCount++] = (bucketStart == 0) ? 0 : -1;
+            picks[pickCount++] = (next == count) ? count - 1 : -1;
+            for (const auto* series : keyed)
+            {
+                int minIdx = -1;
+                int maxIdx = -1;
+                int gapIdx = -1;
+                int gapRuns = 0;
+                bool inGap = false;
+                for (int i = bucketStart; i < next; ++i)
+                {
+                    const double value = (*series)[static_cast<std::size_t>(i)];
+                    if (!std::isfinite(value))
+                    {
+                        gapIdx = (gapIdx < 0) ? i : gapIdx;
+                        gapRuns += inGap ? 0 : 1;
+                        inGap = true;
+                        continue;
+                    }
+                    inGap = false;
+                    if (minIdx < 0 || value < (*series)[static_cast<std::size_t>(minIdx)])
+                    {
+                        minIdx = i;
+                    }
+                    if (maxIdx < 0 || value > (*series)[static_cast<std::size_t>(maxIdx)])
+                    {
+                        maxIdx = i;
+                    }
+                }
+                collapseBucket = collapseBucket || (gapRuns > 1);
+                picks[pickCount++] = minIdx;
+                picks[pickCount++] = maxIdx;
+                picks[pickCount++] = gapIdx;
+                gapPicks[gapCount++] = gapIdx;
+            }
+            if (collapseBucket)
+            {
+                // Only the gap points and the series' ends survive (see above).
+                picks.fill(-1);
+                picks[0] = (bucketStart == 0) ? 0 : -1;
+                picks[1] = (next == count) ? count - 1 : -1;
+                std::copy_n(gapPicks.begin(), gapCount, picks.begin() + 2);
+            }
+            std::ranges::sort(picks);
+            int previous = -1;
+            for (const int pick : picks)
+            {
+                if (pick < 0 || pick == previous || written >= maxOut)
+                {
+                    continue;
+                }
+                keep(pick, collapseBucket && pick != 0 && pick != count - 1);
+                previous = pick;
+            }
+            bucketStart = next;
+        }
+    }
+
+    x.resize(static_cast<std::size_t>(written));
+    for (auto* series : keyed)
+    {
+        series->resize(static_cast<std::size_t>(written));
+    }
+    for (auto* series : carried)
+    {
+        series->resize(static_cast<std::size_t>(written));
+    }
+}
+
 /// "Now" for history charts, in seconds since the steady_clock epoch, read once per ImGui frame.
 ///
 /// Every chart builds its time axis as `timestamp - historyFrameNowSeconds()` (buildTimeAxis), and
@@ -458,7 +629,7 @@ inline void plotLineWithFill(const char* label,
                              std::optional<ImVec4> fillColor = std::nullopt,
                              float lineThickness = 2.0F,
                              bool drawFill = true,
-                             int maxPointCount = 0)
+                             int maxPointCount = LINE_PLOT_MAX_POINTS_DENSE)
 {
     if (count <= 0)
     {
@@ -471,6 +642,8 @@ inline void plotLineWithFill(const char* label,
     {
         if (drawFill)
         {
+            // Callers pass the theme's fill for their series (charts.*_fill); a series with no theme
+            // fill gets its line colour at 35 % alpha.
             const ImVec4 fill = fillColor.value_or(ImVec4{lineColor.x, lineColor.y, lineColor.z, lineColor.w * 0.35F});
             // Render fill with same label as line so ImPlot treats them as one series.
             // When user clicks legend to hide the series, both fill and line hide together.
@@ -755,7 +928,7 @@ struct TimeAxisConfig
     double clampedOffset = 0.0;
 };
 
-inline TimeAxisConfig makeTimeAxisConfig(const std::vector<double>& timestamps, double maxHistorySeconds, double desiredOffsetSeconds)
+inline TimeAxisConfig makeTimeAxisConfig(std::span<const double> timestamps, double maxHistorySeconds, double desiredOffsetSeconds)
 {
     TimeAxisConfig cfg;
     cfg.xMin = -maxHistorySeconds;
@@ -783,7 +956,7 @@ inline TimeAxisConfig makeTimeAxisConfig(const std::vector<double>& timestamps, 
 /// double, not float: plotLineWithFill() adds now back to x to bucket samples in absolute time
 /// (reduceSeriesMinMax), and a float x carries a rounding error that changes as now advances, so a
 /// sample near a bucket boundary could still change bucket from frame to frame (#1051 review).
-inline std::vector<double> buildTimeAxis(const std::vector<double>& timestamps, size_t desiredCount, double nowSeconds)
+inline std::vector<double> buildTimeAxis(std::span<const double> timestamps, size_t desiredCount, double nowSeconds)
 {
     const size_t n = std::min(desiredCount, timestamps.size());
     std::vector<double> timeData(n);
@@ -795,7 +968,7 @@ inline std::vector<double> buildTimeAxis(const std::vector<double>& timestamps, 
     return timeData;
 }
 
-inline std::vector<double> buildTimeAxisDoubles(const std::vector<double>& timestamps, size_t desiredCount, double nowSeconds)
+inline std::vector<double> buildTimeAxisDoubles(std::span<const double> timestamps, size_t desiredCount, double nowSeconds)
 {
     const size_t n = std::min(desiredCount, timestamps.size());
     std::vector<double> timeData(n);

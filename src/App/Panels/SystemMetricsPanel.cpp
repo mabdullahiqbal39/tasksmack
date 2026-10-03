@@ -104,7 +104,6 @@ constexpr const char* CPU_USER_LABEL = "User";
 constexpr const char* CPU_SYSTEM_LABEL = "System";
 constexpr const char* CPU_IOWAIT_LABEL = "I/O Wait";
 constexpr const char* CPU_IDLE_LABEL = "Idle";
-constexpr const char* CPU_SINGLE_LABEL = "CPU";
 constexpr const char* POWER_LABEL = "Power";
 constexpr const char* BATTERY_LABEL = "Battery";
 constexpr const char* THREADS_LABEL = "Threads";
@@ -654,16 +653,31 @@ void SystemMetricsPanel::renderOverview()
                 auto& ySystemTop = m_CpuStackYSystem;
                 auto& yIowaitTop = m_CpuStackYIowait;
 
+                m_CpuStackSystem.resize(breakdownCount);
+                m_CpuStackIowait.resize(breakdownCount);
                 for (size_t i = 0; i < breakdownCount; ++i)
                 {
                     yUserTop[i] = static_cast<double>(cpuUserData[i]);
-                    ySystemTop[i] = yUserTop[i] + static_cast<double>(cpuSystemData[i]);
-                    yIowaitTop[i] = ySystemTop[i] + static_cast<double>(cpuIowaitData[i]);
+                    m_CpuStackSystem[i] = static_cast<double>(cpuSystemData[i]);
+                    m_CpuStackIowait[i] = static_cast<double>(cpuIowaitData[i]);
+                    ySystemTop[i] = yUserTop[i] + m_CpuStackSystem[i];
+                    yIowaitTop[i] = ySystemTop[i] + m_CpuStackIowait[i];
                 }
 
                 // The bands reach "now" like every plotLineWithFill series: the last sample held to
                 // x = 0 (UI::Widgets::holdLastValueToNow, #1016).
                 m_CpuStackX.assign(breakdownTimeData.begin(), breakdownTimeData.end());
+                // The bands are drawn with ImPlot directly, so they are capped here like every
+                // plotLineWithFill series (#1022), reduced together so they still line up. Points are
+                // chosen by each band's own value (User is its own top), not by the cumulative tops:
+                // a System spike while User falls by as much leaves System's top flat, and would be
+                // dropped if the tops chose the points.
+                UI::Widgets::reduceAlignedSeries(m_CpuStackX,
+                                                 {&yUserTop, &m_CpuStackSystem, &m_CpuStackIowait},
+                                                 {&ySystemTop, &yIowaitTop},
+                                                 UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE,
+                                                 nowSeconds);
+                y0.assign(m_CpuStackX.size(), 0.0);
                 if (!m_CpuStackX.empty() && m_CpuStackX.back() < 0.0)
                 {
                     m_CpuStackX.push_back(0.0);
@@ -708,7 +722,7 @@ void SystemMetricsPanel::renderOverview()
                                      cpuData.data(),
                                      UI::Format::checkedCount(cpuData.size()),
                                      theme.scheme().chartCpu,
-                                     std::nullopt,
+                                     theme.scheme().chartCpuFill,
                                      2.0F,
                                      false);
                 }
@@ -729,31 +743,6 @@ void SystemMetricsPanel::renderOverview()
                                                 cpuIdleData[*si]);
                     }
                 }
-            }
-            else if (!cpuData.empty())
-            {
-                plotLineWithFill(CPU_SINGLE_LABEL,
-                                 cpuTimeData.data(),
-                                 cpuData.data(),
-                                 UI::Format::checkedCount(cpuData.size()),
-                                 theme.scheme().chartCpu,
-                                 theme.scheme().chartCpuFill);
-
-                if (ImPlot::IsPlotHovered())
-                {
-                    const ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-                    if (const auto idxVal = hoveredIndexFromPlotX(cpuTimeData, mouse.x))
-                    {
-                        const std::array rows{UI::Widgets::TooltipRow{.label = CPU_SINGLE_LABEL,
-                                                                      .color = theme.scheme().chartCpu,
-                                                                      .value = UI::Format::percentCompact(cpuData[*idxVal])}};
-                        UI::Widgets::renderHistoryTooltip(cpuTimeData[*idxVal], rows);
-                    }
-                }
-            }
-            else
-            {
-                ImPlot::PlotDummy("##CPU");
             }
         }
     };
@@ -831,17 +820,8 @@ void SystemMetricsPanel::renderOverview()
         // Rendered from the first frame, empty and showing the collecting hint until samples arrive,
         // like every other chart; it used to appear only once it had data (#1013).
         {
-            // Convert power double history to float for ImPlot compatibility
-            std::vector<float> powerHist;
-            if (powerCount > 0)
-            {
-                powerHist.reserve(powerCount);
-                const auto startIt = m_ProcessPowerHistory.end() - static_cast<std::ptrdiff_t>(powerCount);
-                for (auto it = startIt; it != m_ProcessPowerHistory.end(); ++it)
-                {
-                    powerHist.push_back(static_cast<float>(*it));
-                }
-            }
+            // A view into the power history, plotted as doubles -- no per-frame copy (#1018).
+            const auto powerHist = UI::Widgets::tailAlignedSpan(m_ProcessPowerHistory, powerCount).values;
 
             // Battery history, with the model's "no reading" value (-1) as NaN: a gap in the line,
             // not a dive to 0 %.
@@ -860,7 +840,7 @@ void SystemMetricsPanel::renderOverview()
             const std::vector<double> batteryTimeData = buildTimeAxis(timestamps, batteryCount, nowSeconds);
             const auto axis = makeTimeAxisConfig(timestamps, m_MaxHistorySeconds, m_HistoryScrollSeconds);
             // Update smoothed values: the latest *reading*, skipping trailing gaps.
-            const float targetPower = powerHist.empty() ? 0.0F : powerHist.back();
+            const float targetPower = powerHist.empty() ? 0.0F : static_cast<float>(powerHist.back()); // updateSmoothedPower takes float
             const auto finiteBattery = batteryHist | std::views::reverse;
             const auto lastBattery = std::ranges::find_if(finiteBattery, [](float v) { return !std::isnan(v); });
             const float targetBattery = (lastBattery != finiteBattery.end()) ? *lastBattery : 0.0F;
@@ -928,7 +908,7 @@ void SystemMetricsPanel::renderOverview()
                                          powerHist.data(),
                                          UI::Format::checkedCount(powerHist.size()),
                                          theme.scheme().chartCpu,
-                                         std::nullopt,
+                                         theme.scheme().chartCpuFill,
                                          2.0F,
                                          true,
                                          UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -943,7 +923,7 @@ void SystemMetricsPanel::renderOverview()
                                          batteryHist.data(),
                                          UI::Format::checkedCount(batteryHist.size()),
                                          theme.scheme().chartMemory,
-                                         std::nullopt,
+                                         theme.scheme().chartMemoryFill,
                                          2.0F,
                                          true,
                                          UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -1119,17 +1099,15 @@ void SystemMetricsPanel::renderOverview()
         const auto axis = alignedCount > 0 ? makeTimeAxisConfig(procTimestamps, m_MaxHistorySeconds, m_HistoryScrollSeconds)
                                            : makeTimeAxisConfig({}, m_MaxHistorySeconds, m_HistoryScrollSeconds);
 
+        // Views into the panel's history, plotted as doubles -- no per-frame float copies (#1018).
         std::vector<double> timeData;
-        std::vector<float> faultData;
-        std::vector<float> threadData;
-        std::vector<float> handleData;
+        const auto faultData = UI::Widgets::tailAlignedSpan(pageFaultHist, alignedCount).values;
+        const auto threadData = UI::Widgets::tailAlignedSpan(threadHist, alignedCount).values;
+        const auto handleData = UI::Widgets::tailAlignedSpan(handleHist, alignedCount).values;
 
         if (alignedCount > 0)
         {
             timeData = buildTimeAxis(procTimestamps, alignedCount, nowSeconds);
-            faultData.assign(pageFaultHist.end() - static_cast<std::ptrdiff_t>(alignedCount), pageFaultHist.end());
-            threadData.assign(threadHist.end() - static_cast<std::ptrdiff_t>(alignedCount), threadHist.end());
-            handleData.assign(handleHist.end() - static_cast<std::ptrdiff_t>(alignedCount), handleHist.end());
 
             // Update smoothed values
             const auto targetThreads = static_cast<double>(threadData.back());
@@ -1186,7 +1164,7 @@ void SystemMetricsPanel::renderOverview()
                                  threadData.data(),
                                  count,
                                  theme.scheme().chartCpu,
-                                 std::nullopt,
+                                 theme.scheme().chartCpuFill,
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -1206,7 +1184,7 @@ void SystemMetricsPanel::renderOverview()
                                  handleData.data(),
                                  count,
                                  theme.scheme().chartMemory,
-                                 std::nullopt,
+                                 theme.scheme().chartMemoryFill,
                                  2.0F,
                                  true,
                                  UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);

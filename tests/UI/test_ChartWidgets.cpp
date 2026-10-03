@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <format>
 #include <limits>
+#include <ranges>
 #include <span>
 #include <string>
 #include <utility>
@@ -324,6 +325,125 @@ TEST(ChartWidgetsReduceTest, MinMaxReductionIsStableAsTheWindowScrolls)
             EXPECT_DOUBLE_EQ(outY[static_cast<std::size_t>(k)], firstY[static_cast<std::size_t>(k)]) << "point " << k;
         }
     }
+}
+
+TEST(ChartWidgetsReduceTest, AlignedReductionCapsStackedSeriesAndKeepsThemAligned)
+{
+    // #1022 review: the stacked CPU bands and the process CPU lines were drawn with ImPlot directly,
+    // uncapped. reduceAlignedSeries() caps them while keeping every series at the same x points.
+    ReduceFixture f;
+    std::vector<double> user(ReduceFixture::COUNT, 5.0);
+    std::vector<double> top(ReduceFixture::COUNT, 20.0);
+    std::vector<double> carried(ReduceFixture::COUNT);
+    for (int i = 0; i < ReduceFixture::COUNT; ++i)
+    {
+        carried[static_cast<std::size_t>(i)] = static_cast<double>(i); // identifies the source sample
+    }
+    user[1234] = 60.0; // a single-sample peak in one band
+    top[2345] = 95.0;  // and in another
+    auto x = f.x;
+
+    reduceAlignedSeries(x, {&user, &top}, {&carried}, LINE_PLOT_MAX_POINTS_DENSE, 1000.0);
+
+    ASSERT_LE(x.size(), static_cast<std::size_t>(LINE_PLOT_MAX_POINTS_DENSE));
+    ASSERT_GT(x.size(), 2U);
+    ASSERT_EQ(user.size(), x.size());
+    ASSERT_EQ(top.size(), x.size());
+    ASSERT_EQ(carried.size(), x.size());
+    // Each kept point is one source sample, taken from every series at once.
+    for (std::size_t k = 0; k < x.size(); ++k)
+    {
+        const auto source = static_cast<std::size_t>(carried[k]);
+        EXPECT_DOUBLE_EQ(x[k], f.x[source]) << "point " << k;
+        if (k > 0)
+        {
+            EXPECT_GT(carried[k], carried[k - 1]);
+        }
+    }
+    EXPECT_DOUBLE_EQ(std::ranges::max(user), 60.0);
+    EXPECT_DOUBLE_EQ(std::ranges::max(top), 95.0);
+    // The oldest and newest samples are always kept.
+    EXPECT_DOUBLE_EQ(carried.front(), 0.0);
+    EXPECT_DOUBLE_EQ(x.back(), 0.0);
+}
+
+TEST(ChartWidgetsReduceTest, AlignedReductionKeyedOnBandValuesKeepsASpikeUnderAFlatTop)
+{
+    // #1061 review: System rises from 10 to 30 at one sample while User falls from 50 to 30, so the
+    // cumulative System top stays at 60. Choosing points by the band's own value keeps that spike;
+    // the tops ride along as carried series.
+    const ReduceFixture f;
+    std::vector<double> user(ReduceFixture::COUNT, 50.0);
+    std::vector<double> system(ReduceFixture::COUNT, 10.0);
+    user[1234] = 30.0;
+    system[1234] = 30.0;
+    std::vector<double> systemTop(ReduceFixture::COUNT);
+    for (std::size_t i = 0; i < systemTop.size(); ++i)
+    {
+        systemTop[i] = user[i] + system[i]; // 60 throughout
+    }
+    auto x = f.x;
+
+    reduceAlignedSeries(x, {&user, &system}, {&systemTop}, LINE_PLOT_MAX_POINTS_DENSE, 1000.0);
+
+    ASSERT_LE(x.size(), static_cast<std::size_t>(LINE_PLOT_MAX_POINTS_DENSE));
+    EXPECT_DOUBLE_EQ(std::ranges::max(system), 30.0);
+    EXPECT_DOUBLE_EQ(std::ranges::min(user), 30.0);
+    // The band between User and the System top shows it: 30 thick at the spike, 10 elsewhere.
+    EXPECT_TRUE(
+        std::ranges::any_of(std::views::iota(std::size_t{0}, x.size()), [&](std::size_t k) { return systemTop[k] - user[k] == 30.0; }));
+}
+
+TEST(ChartWidgetsReduceTest, AlignedReductionNeverDrawsASeriesAcrossItsGap)
+{
+    // #1061 review: series A has two separate gaps in one bucket, and B's peak and dip fall between
+    // and after them. B's picks must not give A finite points on both sides of a gap with no gap point
+    // between: the drawn line would cross a missing reading.
+    const ReduceFixture f;
+    std::vector<double> a(ReduceFixture::COUNT, 10.0);
+    std::vector<double> b(ReduceFixture::COUNT, 50.0);
+    // With x anchored at 1000, samples 1479-1518 share one 4 s bucket (2 keys: 118 buckets over 300 s).
+    a[1485] = std::numeric_limits<double>::quiet_NaN();
+    a[1505] = std::numeric_limits<double>::quiet_NaN();
+    b[1495] = 90.0;                  // between A's gaps
+    b[1510] = 5.0;                   // after the second
+    std::vector<double> sourceA = a; // full-resolution A, to check the reduced points against
+    auto x = f.x;
+
+    reduceAlignedSeries(x, {&a, &b}, {}, LINE_PLOT_MAX_POINTS_DENSE, 1000.0);
+
+    ASSERT_LE(x.size(), static_cast<std::size_t>(LINE_PLOT_MAX_POINTS_DENSE));
+    const auto sourceOf = [](double xv)
+    {
+        return static_cast<std::size_t>(std::lround((xv / 0.1) + (ReduceFixture::COUNT - 1)));
+    };
+    for (std::size_t k = 1; k < x.size(); ++k)
+    {
+        if (!std::isfinite(a[k - 1]) || !std::isfinite(a[k]))
+        {
+            continue;
+        }
+        // Two consecutive finite points of A: no missing reading of A may lie between them.
+        for (std::size_t i = sourceOf(x[k - 1]); i <= sourceOf(x[k]); ++i)
+        {
+            EXPECT_TRUE(std::isfinite(sourceA[i])) << "A drawn across its gap at sample " << i << " (points " << k - 1 << "-" << k << ")";
+        }
+    }
+    EXPECT_TRUE(std::ranges::any_of(a, [](double v) { return std::isnan(v); }));
+}
+
+TEST(ChartWidgetsReduceTest, AlignedReductionLeavesShortSeriesAndKeepsGaps)
+{
+    std::vector<double> x = {-3.0, -2.0, -1.0, 0.0};
+    std::vector<double> y = {1.0, 2.0, 3.0, 4.0};
+    reduceAlignedSeries(x, {&y}, {}, LINE_PLOT_MAX_POINTS_DENSE, 0.0);
+    EXPECT_EQ(x.size(), 4U);
+
+    ReduceFixture f;
+    f.y[1500] = std::numeric_limits<double>::quiet_NaN(); // one missing reading
+    auto gx = f.x;
+    reduceAlignedSeries(gx, {&f.y}, {}, LINE_PLOT_MAX_POINTS_DENSE, 1000.0);
+    EXPECT_TRUE(std::ranges::any_of(f.y, [](double v) { return std::isnan(v); }));
 }
 
 TEST(ChartWidgetsReduceTest, MinMaxReductionKeepsAGap)
@@ -939,6 +1059,13 @@ TEST(HistoryChartConfigTest, YAxisFlagsLockWithFixedLimitsAutoFitOtherwise)
 
 // ========== historyChartBeginPlotFlags (perf-plan #843 phase 1: showLegend=false must
 // actually suppress the legend, not just skip customizing it) ==========
+
+TEST(ChartWidgetsTest, DefaultPlotFlagsHideImPlotsMouseReadout)
+{
+    // Every history chart has its own tooltip; ImPlot's raw cursor coordinates were a second,
+    // unlabelled readout of the same point (#1039).
+    EXPECT_TRUE((PLOT_FLAGS_DEFAULT & ImPlotFlags_NoMouseText) != 0);
+}
 
 TEST(HistoryChartConfigTest, BeginPlotFlagsUnchangedWhenLegendShown)
 {

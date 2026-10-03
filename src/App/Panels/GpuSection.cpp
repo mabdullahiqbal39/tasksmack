@@ -292,7 +292,7 @@ void renderGpuSection(RenderContext& ctx)
                                      utilData.data(),
                                      UI::Format::checkedCount(utilData.size()),
                                      theme.scheme().gpuUtilization,
-                                     std::nullopt,
+                                     theme.scheme().gpuUtilizationFill,
                                      2.0F,
                                      true,
                                      UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -305,7 +305,7 @@ void renderGpuSection(RenderContext& ctx)
                                      memData.data(),
                                      UI::Format::checkedCount(memData.size()),
                                      theme.scheme().gpuMemory,
-                                     std::nullopt,
+                                     theme.scheme().gpuMemoryFill,
                                      2.0F,
                                      true,
                                      UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -323,7 +323,7 @@ void renderGpuSection(RenderContext& ctx)
                                      clockPercentBuf.data(),
                                      UI::Format::checkedCount(clockTimeData.values.size()),
                                      theme.scheme().gpuClock,
-                                     std::nullopt,
+                                     theme.scheme().gpuClockFill,
                                      2.0F,
                                      true,
                                      UI::Widgets::LINE_PLOT_MAX_POINTS_DENSE);
@@ -701,18 +701,11 @@ void renderGpuSection(RenderContext& ctx)
                 }
             };
 
-            // Thermal bars were already built above for alignment calculation
-            // Render thermal chart with the same column count as core chart for x-axis alignment
-            if (!gpuThermalBars.empty())
-            {
-                const std::string thermalLayoutId = std::format("GPUThermalLayout{}", gpuIdx);
-                renderHistoryWithNowBars(thermalLayoutId.c_str(), plotHeight, gpuThermalPlot, gpuThermalBars, false, gpuNowBarColumns);
-            }
-            else
-            {
-                // No current data, just render the plot without now bars
-                gpuThermalPlot();
-            }
+            // Thermal bars were already built above for alignment calculation, one for each capability
+            // that brought this chart here, so there is always at least one. Rendered with the same
+            // column count as the core chart for x-axis alignment.
+            const std::string thermalLayoutId = std::format("GPUThermalLayout{}", gpuIdx);
+            renderHistoryWithNowBars(thermalLayoutId.c_str(), plotHeight, gpuThermalPlot, gpuThermalBars, false, gpuNowBarColumns);
             countPlot();
 
             // Show notes for unavailable metrics
