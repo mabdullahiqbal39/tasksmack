@@ -633,8 +633,11 @@ void SystemMetricsPanel::renderOverview()
 
     auto cpuPlot = [&]()
     {
+        // Four short legend entries (User, System, I/O Wait, Total) on a chart that is short at large
+        // fonts: one row, so none is clipped (see HistoryChartConfig::legendHorizontal).
         const UI::Widgets::HistoryChart chart(UI::Widgets::withHeight(
-            UI::Widgets::percentHistoryConfig("##OverviewCPUHistory", axisConfig.xMin, axisConfig.xMax), plotHeight));
+            UI::Widgets::withHorizontalLegend(UI::Widgets::percentHistoryConfig("##OverviewCPUHistory", axisConfig.xMin, axisConfig.xMax)),
+            plotHeight));
         if (chart.active())
         {
             if (breakdownCount > 0)

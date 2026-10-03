@@ -847,13 +847,12 @@ inline auto hoveredIndexFromPlotX(const std::vector<double>& timeData, double mo
     return (distUpper < distLower) ? upperIdx : lowerIdx;
 }
 
-inline void setupLegendDefault()
+/// @param horizontal  Lay the entries out in one row instead of a column; see
+///                    HistoryChartConfig::legendHorizontal for when.
+inline void setupLegendDefault(bool horizontal = false)
 {
-    // Horizontal: one row at any font size. ImPlot clips the legend to the plot area, and a vertical
-    // list of four series (the CPU chart's User/System/I/O Wait/Total) is taller than a chart's data
-    // area at the largest font presets, so the last entry was cut off. The row sits over the oldest
-    // part of the window, which is usually empty.
-    ImPlot::SetupLegend(ImPlotLocation_NorthWest, ImPlotLegendFlags_NoHighlightItem | ImPlotLegendFlags_Horizontal);
+    ImPlot::SetupLegend(ImPlotLocation_NorthWest,
+                        ImPlotLegendFlags_NoHighlightItem | (horizontal ? ImPlotLegendFlags_Horizontal : ImPlotLegendFlags_None));
 }
 
 /// Samples a history chart needs before its "collecting" hint is dropped.
@@ -906,6 +905,12 @@ struct HistoryChartConfig
     ImPlotFormatter yFormatter = formatAxisLocalized;
     std::optional<std::pair<double, double>> yLimits;
     bool showLegend = true;
+    /// One row of legend entries instead of a column. ImPlot clips a legend to the plot area: a column
+    /// of four entries is taller than a short chart's data area at the largest font presets (the
+    /// system CPU chart's User/System/I/O Wait/Total lost its last entry), while a row of long labels
+    /// is wider than a narrow chart. So it is per chart: set for a chart with several short labels and
+    /// little height, left off for one with long labels (adapter names, GPU engines).
+    bool legendHorizontal = false;
     float height = HISTORY_PLOT_HEIGHT_DEFAULT;
     ImPlotFlags flags = PLOT_FLAGS_DEFAULT;
     /// Ease the Y upper bound toward yLimits->second over a few frames instead of jumping to it
@@ -919,6 +924,13 @@ struct HistoryChartConfig
 [[nodiscard]] inline HistoryChartConfig withHeight(HistoryChartConfig config, float height)
 {
     config.height = height;
+    return config;
+}
+
+/// Returns `config` with its legend laid out in one row (see HistoryChartConfig::legendHorizontal).
+[[nodiscard]] inline HistoryChartConfig withHorizontalLegend(HistoryChartConfig config)
+{
+    config.legendHorizontal = true;
     return config;
 }
 
@@ -1069,7 +1081,7 @@ class HistoryChart
 
         if (config.showLegend)
         {
-            setupLegendDefault();
+            setupLegendDefault(config.legendHorizontal);
         }
         ImPlot::SetupAxes("Time (s)", nullptr, X_AXIS_FLAGS_DEFAULT, historyChartYAxisFlags(config.yLimits.has_value()));
         ImPlot::SetupAxisFormat(ImAxis_Y1, config.yFormatter);
