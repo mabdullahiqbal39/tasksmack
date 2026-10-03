@@ -375,7 +375,7 @@ void renderStorageSection(RenderContext& ctx)
         const size_t alignedDisk = std::min({historySize, diskReadHist.size(), diskWriteHist.size()});
 
         // Take the newest alignedDisk entries of each series, so read, write and time line up by sample.
-        const std::vector<float> aggregateTimes = buildTimeAxis(diskTimestamps, alignedDisk, nowSeconds);
+        const std::vector<double> aggregateTimes = buildTimeAxis(diskTimestamps, alignedDisk, nowSeconds);
         const auto readTail = tailAlignedSpan(diskReadHist, alignedDisk).values;
         const auto writeTail = tailAlignedSpan(diskWriteHist, alignedDisk).values;
         std::vector<float> readData;
