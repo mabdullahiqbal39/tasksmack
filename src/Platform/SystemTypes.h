@@ -12,6 +12,7 @@ namespace Platform
 /// Probes populate this; domain computes deltas and percentages.
 struct CpuCounters
 {
+std::size_t index = 0;
     uint64_t user = 0;    // Normal processes executing in user mode
     uint64_t nice = 0;    // Niced processes executing in user mode
     uint64_t system = 0;  // Processes executing in kernel mode
