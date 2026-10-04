@@ -681,8 +681,12 @@ inline Platform::SystemCounters makeSystemCounters(const Platform::CpuCounters& 
     s.cpuTotal = cpu;
     s.memory = memory;
     s.uptimeSeconds = uptime;
-    s.cpuPerCore = std::move(perCore);
-    s.netRxBytes = netRxBytes;
+   s.cpuPerCore = std::move(perCore);
+for (std::size_t i = 0; i < s.cpuPerCore.size(); ++i)
+{
+    s.cpuPerCore[i].index = i;
+}
+s.netRxBytes = netRxBytes;
     s.netTxBytes = netTxBytes;
     s.networkInterfaces = std::move(networkInterfaces);
     return s;
