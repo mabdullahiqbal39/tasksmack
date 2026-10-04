@@ -215,7 +215,8 @@ void LinuxSystemProbe::readCpuCounters(SystemCounters& counters, const std::file
         }
         else
         {
-            counters.cpuPerCore.push_back(cpu);
+            cpu.index = static_cast<std::size_t>(std::stoul(std::string(p + 3, q)));
+    counters.cpuPerCore.push_back(cpu);
         }
 
         p = (lineEnd < end) ? lineEnd + 1 : end;
