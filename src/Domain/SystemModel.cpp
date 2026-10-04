@@ -462,32 +462,54 @@ void SystemModel::computeSnapshot(const Platform::SystemCounters& counters, doub
         snap.cpuTotal = computeCpuUsage(counters.cpuTotal, m_PrevCounters.cpuTotal);
 
         // Per-core CPU
-        const std::size_t numCores = std::min(counters.cpuPerCore.size(), m_PrevCounters.cpuPerCore.size());
-        snap.cpuPerCore.reserve(numCores);
+       const std::size_t maxCoreIndex = counters.cpuPerCore.empty()
+                                     ? 0
+                                     : std::ranges::max_element(
+                                           counters.cpuPerCore,
+                                           [](const auto& a, const auto& b)
+                                           {
+                                               return a.index < b.index;
+                                           })
+                                           ->index;
 
-        // Resize per-core history if needed (new cores get zero backfill so all
-        // rings stay in lockstep with m_Timestamps)
-        if (m_PerCoreHistory.size() < numCores)
-        {
-            const std::size_t capacity = Sampling::historyCapacityForSeconds(m_MaxHistorySeconds);
-            const std::size_t backfillCount = std::min(m_Timestamps.size(), capacity - 1);
-            const std::size_t oldSize = m_PerCoreHistory.size();
-            m_PerCoreHistory.resize(numCores);
-            for (std::size_t i = oldSize; i < numCores; ++i)
-            {
-                m_PerCoreHistory[i].setCapacity(capacity);
-                for (std::size_t j = 0; j < backfillCount; ++j)
-                {
-                    m_PerCoreHistory[i].push(0.0F);
-                }
-            }
-        }
+const std::size_t requiredHistorySize =
+    counters.cpuPerCore.empty() ? 0 : maxCoreIndex + 1;
 
-        for (std::size_t i = 0; i < numCores; ++i)
+snap.cpuPerCore.reserve(counters.cpuPerCore.size());
+
+// Resize per-core history by stable CPU identity. New slots are backfilled
+// with NaN because there was no measurement for those cores.
+if (m_PerCoreHistory.size() < requiredHistorySize)
+{
+    const std::size_t capacity = Sampling::historyCapacityForSeconds(m_MaxHistorySeconds);
+    const std::size_t backfillCount = std::min(m_Timestamps.size(), capacity - 1);
+    const std::size_t oldSize = m_PerCoreHistory.size();
+
+    m_PerCoreHistory.resize(requiredHistorySize);
+
+    for (std::size_t i = oldSize; i < requiredHistorySize; ++i)
+    {
+        m_PerCoreHistory[i].setCapacity(capacity);
+        for (std::size_t j = 0; j < backfillCount; ++j)
         {
-            auto coreUsage = computeCpuUsage(counters.cpuPerCore[i], m_PrevCounters.cpuPerCore[i]);
-            snap.cpuPerCore.push_back(coreUsage);
+            m_PerCoreHistory[i].push(std::numeric_limits<float>::quiet_NaN());
         }
+    }
+}
+      for (const auto& currentCore : counters.cpuPerCore)
+{
+    const auto it = std::ranges::find_if(
+        m_PrevCounters.cpuPerCore,
+        [&currentCore](const auto& previousCore)
+        {
+            return previousCore.index == currentCore.index;
+        });
+
+    if (it != m_PrevCounters.cpuPerCore.end())
+    {
+        snap.cpuPerCore.push_back(computeCpuUsage(currentCore, *it));
+    }
+}
 
         // Total network rate is the sum of the per-interface rates computed above, not the change in
         // the summed lifetime counters. With the summed counters, an interface appearing (a VPN
@@ -616,17 +638,38 @@ void SystemModel::computeSnapshot(const Platform::SystemCounters& counters, doub
 
         // Advance rings for present cores; push 0.0F for any retained rings beyond
         // the reported core count so every core series stays aligned with m_Timestamps.
-        for (std::size_t i = 0; i < m_PerCoreHistory.size(); ++i)
+ for (std::size_t i = 0; i < m_PerCoreHistory.size(); ++i)
+{
+    const auto currentIt = std::ranges::find_if(
+        counters.cpuPerCore,
+        [i](const auto& core)
         {
-            if (i < snap.cpuPerCore.size())
-            {
-                m_PerCoreHistory[i].push(Numeric::clampPercentToFloat(snap.cpuPerCore[i].totalPercent));
-            }
-            else
-            {
-                m_PerCoreHistory[i].push(0.0F);
-            }
-        }
+            return core.index == i;
+        });
+
+    if (currentIt == counters.cpuPerCore.end())
+    {
+        m_PerCoreHistory[i].push(std::numeric_limits<float>::quiet_NaN());
+        continue;
+    }
+
+    const auto previousIt = std::ranges::find_if(
+        m_PrevCounters.cpuPerCore,
+        [i](const auto& core)
+        {
+            return core.index == i;
+        });
+
+    if (previousIt == m_PrevCounters.cpuPerCore.end())
+    {
+        m_PerCoreHistory[i].push(std::numeric_limits<float>::quiet_NaN());
+        continue;
+    }
+
+    const auto coreUsage = computeCpuUsage(*currentIt, *previousIt);
+    m_PerCoreHistory[i].push(
+        Numeric::clampPercentToFloat(coreUsage.totalPercent));
+}
 
         trimHistory(nowSeconds);
     }
