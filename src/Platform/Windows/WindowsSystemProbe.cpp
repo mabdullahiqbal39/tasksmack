@@ -277,11 +277,13 @@ void WindowsSystemProbe::readPerCoreCpuCounters(SystemCounters& counters) const
         // KernelTime includes idle, and DPC/interrupt time are inside kernel time; processorTimes()
         // splits them so CpuCounters::active() counts each tick once (#1032). DpcTime is the
         // closest Windows analogue of Linux softirq.
-        counters.cpuPerCore.push_back(processorTimes(largeIntegerToTicks(info.KernelTime),
-                                                     largeIntegerToTicks(info.IdleTime),
-                                                     largeIntegerToTicks(info.UserTime),
-                                                     largeIntegerToTicks(info.DpcTime),
-                                                     largeIntegerToTicks(info.InterruptTime)));
+       auto cpu = processorTimes(largeIntegerToTicks(info.KernelTime),
+                          largeIntegerToTicks(info.IdleTime),
+                          largeIntegerToTicks(info.UserTime),
+                          largeIntegerToTicks(info.DpcTime),
+                          largeIntegerToTicks(info.InterruptTime));
+cpu.index = i;
+counters.cpuPerCore.push_back(cpu);
     }
 
     spdlog::trace("Read per-core CPU for {} cores", coresReturned);
