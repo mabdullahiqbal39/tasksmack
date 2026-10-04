@@ -181,6 +181,7 @@ void SystemMetricsPanel::onAttach()
 
     Domain::SamplerConfig samplerCfg;
     samplerCfg.interval = m_RefreshInterval;
+    samplerCfg.firstSampleAfterInterval = true; // seeded synchronously above (#1102)
     m_Sampler = std::make_unique<Domain::BackgroundSampler>(samplerCfg);
     m_Sampler->addSamplable(m_Model);
     m_Sampler->addSamplable(m_StorageModel);
@@ -221,15 +222,22 @@ void SystemMetricsPanel::onDetach()
     m_Model.reset();
 }
 
-void SystemMetricsPanel::setSamplingInterval(std::chrono::milliseconds interval)
+void SystemMetricsPanel::setSamplingInterval(std::chrono::milliseconds interval, bool forceSample)
 {
+    if (interval == m_RefreshInterval)
+    {
+        return;
+    }
     m_RefreshInterval = interval;
     if (m_Sampler)
     {
         m_Sampler->setInterval(interval);
     }
-    m_ForceRefresh = true;
-    requestRefresh(); // Consume flag semantics for older calls
+    if (forceSample)
+    {
+        m_ForceRefresh = true;
+        requestRefresh(); // Consume flag semantics for older calls
+    }
 }
 
 void SystemMetricsPanel::requestRefresh()
@@ -253,13 +261,21 @@ void SystemMetricsPanel::onEvent(Core::Event& event)
     dispatcher.dispatch<Core::RefreshRateChangedEvent>(
         [this](Core::RefreshRateChangedEvent& e)
         {
-            setSamplingInterval(std::chrono::milliseconds(e.getIntervalMs()));
+            // The startup value (#1079) is applied without forcing a sample: the models were just
+            // seeded, so one now would cover only a few ms (#1102).
+            setSamplingInterval(std::chrono::milliseconds(e.getIntervalMs()), !e.isInitial());
             return false;
         });
     dispatcher.dispatch<Core::HistoryDurationChangedEvent>(
         [this](Core::HistoryDurationChangedEvent& e)
         {
-            m_MaxHistorySeconds = Domain::Numeric::toDouble(e.getSeconds());
+            const double seconds = Domain::Numeric::toDouble(e.getSeconds());
+            // Whole seconds, so anything under half a second apart is the same setting.
+            if (std::abs(seconds - m_MaxHistorySeconds) < 0.5)
+            {
+                return false; // unchanged: nothing to trim or refresh
+            }
+            m_MaxHistorySeconds = seconds;
             if (m_Model)
             {
                 m_Model->setMaxHistorySeconds(m_MaxHistorySeconds);
@@ -272,7 +288,8 @@ void SystemMetricsPanel::onEvent(Core::Event& event)
             {
                 m_GPUModel->setMaxHistorySeconds(m_MaxHistorySeconds);
             }
-            m_ForceRefresh = true;
+            // Republish promptly for a user's change; not for the startup value, just after the seed (#1102).
+            m_ForceRefresh = m_ForceRefresh || !e.isInitial();
             return false; // Allow others to react
         });
 }
@@ -714,6 +731,26 @@ void SystemMetricsPanel::renderOverview()
                                        {ImPlotProp_FillColor, theme.scheme().cpuIowaitFill});
                 }
 
+                // A 1px edge along the top of each band, under the band's own label. ImPlot draws a
+                // legend icon in its item's colour at that colour's alpha, so a band alone showed its
+                // 35% fill as the swatch: a dull block unlike the band's opaque NowBar. The edge
+                // shares the label, so it is the same legend item, and its opaque colour becomes the
+                // swatch; hiding the item from the legend hides both (#1192).
+                const auto bandEdge = [&](const char* label, const std::vector<double>& top, const ImVec4& color)
+                {
+                    ImPlot::PlotLine(label,
+                                     m_CpuStackX.data(),
+                                     top.data(),
+                                     stackCount,
+                                     {ImPlotProp_LineColor, color, ImPlotProp_LineWeight, UI::Widgets::lineWeight(1.0F)});
+                };
+                bandEdge(CPU_USER_LABEL, yUserTop, theme.scheme().cpuUser);
+                bandEdge(CPU_SYSTEM_LABEL, ySystemTop, theme.scheme().cpuSystem);
+                if (showIowait)
+                {
+                    bandEdge(CPU_IOWAIT_LABEL, yIowaitTop, theme.scheme().cpuIowait);
+                }
+
                 // Total over the stack. It is 100 - idle, so it includes irq, softirq and steal time
                 // the three bands do not: without it the "CPU Total" bar had no series, and the top
                 // of the stack understated the load whenever that other time was significant.
@@ -754,7 +791,7 @@ void SystemMetricsPanel::renderOverview()
                        .label = CPU_TOTAL_LABEL,
                        .tooltipText = {},
                        .value01 = UI::Format::percent01(m_SmoothedCpu.total),
-                       .color = theme.progressColor(m_SmoothedCpu.total)});
+                       .color = theme.scheme().chartCpu}); // The Total line's colour (#1192)
     cpuBars.push_back({.valueText = UI::Format::percentCompact(m_SmoothedCpu.user),
                        .label = CPU_USER_LABEL,
                        .tooltipText = {},
