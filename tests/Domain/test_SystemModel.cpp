@@ -656,6 +656,125 @@ TEST(SystemModelTest, PerCoreHistoryStaysAlignedOnCoreCountDecrease)
         EXPECT_TRUE(std::isnan(cores[1].back()));
     }
 }
+TEST(SystemModelTest, PerCoreHistoryKeepsStableIdentityWhenInteriorCoreDisappears)
+{
+    auto probe = std::make_unique<MockSystemProbe>();
+    auto* rawProbe = probe.get();
+    const auto setCpuIndices = [](std::vector<Platform::CpuCounters>& cores)
+{
+    for (std::size_t i = 0; i < cores.size(); ++i)
+    {
+        cores[i].index = i;
+    }
+};
+
+    // Sample 1: CPUs 0, 1, 2, 3 are present.
+    std::vector<Platform::CpuCounters> cores1 = {
+        makeCpuCounters(0, 0, 0, 10000),
+        makeCpuCounters(0, 0, 0, 10000),
+        makeCpuCounters(0, 0, 0, 10000),
+        makeCpuCounters(0, 0, 0, 10000)
+    };
+    
+
+    rawProbe->setCounters(
+        makeSystemCounters(makeCpuCounters(0, 0, 0, 40000),
+                            makeMemoryCounters(1024, 512),
+                            0,
+                            cores1));
+
+    Domain::SystemModel model(std::move(probe));
+    model.refresh();
+
+    // Sample 2: CPUs 0, 1, 2, 3 are still present.
+    std::vector<Platform::CpuCounters> cores2 = {
+        makeCpuCounters(1000, 0, 0, 9000),  // CPU 0
+        makeCpuCounters(2000, 0, 0, 8000),  // CPU 1
+        makeCpuCounters(3000, 0, 0, 7000),  // CPU 2
+        makeCpuCounters(4000, 0, 0, 6000)   // CPU 3
+    };
+
+    rawProbe->setCounters(
+        makeSystemCounters(makeCpuCounters(10000, 0, 0, 30000),
+                            makeMemoryCounters(1024, 512),
+                            0,
+                            cores2));
+
+    model.refresh();
+
+    // Sample 3: CPU 2 goes offline, but CPU 3 remains online.
+    // The vector is now {CPU 0, CPU 1, CPU 3}.
+    std::vector<Platform::CpuCounters> cores3 = {
+        makeCpuCounters(2000, 0, 0, 18000), // CPU 0
+        makeCpuCounters(4000, 0, 0, 16000), // CPU 1
+        makeCpuCounters(8000, 0, 0, 12000)  // CPU 3
+    };
+    setCpuIndices(cores3);
+cores3[2].index = 3;
+
+    rawProbe->setCounters(
+        makeSystemCounters(makeCpuCounters(14000, 0, 0, 46000),
+                            makeMemoryCounters(1024, 512),
+                            0,
+                            cores3));
+
+    model.refresh();
+
+    auto cores = model.perCoreHistory();
+
+    ASSERT_EQ(cores.size(), 4);
+
+    // CPU 2 is offline, so its history should contain a NaN gap.
+    EXPECT_TRUE(std::isnan(cores[2].back()));
+
+    // CPU 3 is still online, so its history must contain a real value,
+    // not a value calculated against CPU 2's previous counters.
+   EXPECT_FLOAT_EQ(cores[3].back(), 40.0F);
+    std::vector<Platform::CpuCounters> cores4 = {
+    makeCpuCounters(3000, 0, 0, 17000), // CPU 0
+    makeCpuCounters(6000, 0, 0, 15000), // CPU 1
+    makeCpuCounters(5000, 0, 0, 15000), // CPU 2
+    makeCpuCounters(12000, 0, 0, 18000) // CPU 3
+};
+
+setCpuIndices(cores4);
+
+rawProbe->setCounters(
+    makeSystemCounters(makeCpuCounters(26000, 0, 0, 65000),
+                        makeMemoryCounters(1024, 512),
+                        0,
+                        cores4));
+
+model.refresh();
+    cores = model.perCoreHistory();
+
+ASSERT_EQ(cores.size(), 4);
+
+EXPECT_TRUE(std::isnan(cores[2].back()));
+EXPECT_FLOAT_EQ(cores[3].back(), 40.0F);
+    std::vector<Platform::CpuCounters> cores5 = {
+    makeCpuCounters(4000, 0, 0, 16000), // CPU 0
+    makeCpuCounters(8000, 0, 0, 14000), // CPU 1
+    makeCpuCounters(7000, 0, 0, 13000), // CPU 2
+    makeCpuCounters(16000, 0, 0, 14000) // CPU 3
+};
+
+setCpuIndices(cores5);
+
+rawProbe->setCounters(
+    makeSystemCounters(makeCpuCounters(35000, 0, 0, 57000),
+                        makeMemoryCounters(1024, 512),
+                        0,
+                        cores5));
+
+model.refresh();
+
+cores = model.perCoreHistory();
+
+ASSERT_EQ(cores.size(), 4);
+EXPECT_FLOAT_EQ(cores[2].back(), 50.0F);
+EXPECT_FLOAT_EQ(cores[3].back(), 40.0F);
+}
 
 TEST(SystemModelTest, HotAddedCoreIsBackfilledWithGaps)
 {
